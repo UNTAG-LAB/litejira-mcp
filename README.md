@@ -74,6 +74,22 @@ LTJ_MCP_ENABLE_WRITES=true
 
 跟 AI 說：「用 LiteJira 搜尋最新的 BUG」。看到工單列表 = 成功。
 
+## 進階：dev / prod 雙環境（維護者用）
+
+一般使用者忽略本段。若你要同時連正式與測試兩套 LiteJira，啟動器接受一個環境參數：
+
+| 指令 | 讀哪個 credentials |
+|------|-------------------|
+| `litejira-mcp` | `~/.litejira/credentials.env`（預設） |
+| `litejira-mcp dev` | `~/.litejira/credentials.dev.txt`（找不到再試 `.dev.env`） |
+| `litejira-mcp prod` | `~/.litejira/credentials.prod.txt`（找不到再試 `.prod.env`） |
+
+`.mcp.json` 範例（兩條並存）：
+```json
+"litejira":     { "command": "litejira-mcp", "args": ["prod"] },
+"litejira-dev": { "command": "litejira-mcp", "args": ["dev"] }
+```
+
 ---
 
 ## 能做什麼

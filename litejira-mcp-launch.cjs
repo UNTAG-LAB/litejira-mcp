@@ -1,9 +1,15 @@
 #!/usr/bin/env node
-// MCP server launcher: load credentials from ~/.litejira/credentials.env,
-// then spawn litejira-mcp-server.js with inherited stdio so Claude Code
-// talks to the real server directly.
+// MCP server launcher: load credentials from ~/.litejira/, then spawn
+// litejira-mcp-server.js with inherited stdio so Claude Code talks to the
+// real server directly.
 //
 // Keeps secrets out of .mcp.json (which is checked into git).
+//
+// 選用參數 <env>（LJ-160 #1 路 B）：
+//   litejira-mcp          → 讀 ~/.litejira/credentials.env（預設，一般使用者）
+//   litejira-mcp dev      → 讀 ~/.litejira/credentials.dev.{txt,env}
+//   litejira-mcp prod     → 讀 ~/.litejira/credentials.prod.{txt,env}
+// 無參數時行為與舊版完全一致 → 向下相容，同事無感。
 
 const fs = require('fs');
 const path = require('path');
@@ -52,8 +58,22 @@ function isNewer(a, b) {
   return false;
 }
 
-const credFile = path.join(os.homedir(), '.litejira', 'credentials.env');
-if (fs.existsSync(credFile)) {
+// 依參數挑 credentials 檔。dev/prod 各自找 .txt → .env；無參數沿用 credentials.env → .txt。
+function resolveCredFile() {
+  const target = (process.argv[2] || '').toLowerCase();
+  const dir = path.join(os.homedir(), '.litejira');
+  const names = (target === 'dev' || target === 'prod')
+    ? [`credentials.${target}.txt`, `credentials.${target}.env`]
+    : ['credentials.env', 'credentials.txt'];
+  for (const n of names) {
+    const p = path.join(dir, n);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+const credFile = resolveCredFile();
+if (credFile) {
   const text = fs.readFileSync(credFile, 'utf8');
   for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^(LTJ_API_URL|LTJ_API_TOKEN|LTJ_API_PAT|LTJ_MCP_ENABLE_WRITES)=(.+)$/);

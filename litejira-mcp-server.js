@@ -3,6 +3,10 @@
 const readline = require('readline');
 const { postLiteJiraApi } = require('./ltj-cli');
 
+// LJ-160 #2：版本號單一事實源 = package.json，避免手寫在多處漂移。
+const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
+const PKG_VER_SHORT = PKG_VERSION.split('.').slice(0, 2).join('.'); // 例 "2.3"
+
 // LJ-134: 工單 ID regex（PREFIX-NNN）。試算表工單前綴僅限 FB/BUG/REQ/EPIC/IDEA/TASK/STD。
 // 命名空間紀律（根 CLAUDE.md）：LJ/DEV 是 LiteJira「自身開發」編號，事實源在 BACKLOG.md，
 // 不是試算表工單 → 故意排除。防止把 BACKLOG 編號當試算表工單下 addComment/updateField/linkTickets
@@ -395,10 +399,10 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             resources: { subscribe: false, listChanged: false },
             prompts: { listChanged: false }
           },
-          serverInfo: { name: 'litejira-mcp', version: '2.2.0' },
+          serverInfo: { name: 'litejira-mcp', version: PKG_VERSION },
           // LJ-116: instructions — server-capabilities skill 說「整個 spec 槓桿最高的一行」
           instructions: [
-            'LiteJira MCP server v2.2（LJ-137 動作按鈕流轉對外化）：',
+            `LiteJira MCP server v${PKG_VER_SHORT}：`,
             '',
             '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket 共 10 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
             '- 合法 enum 值請先讀 resource litejira://meta（types / priorities / subtypes / modules / statusMeta / kanbanColumnsByType）',

@@ -1,0 +1,38 @@
+{
+  "name": "litejira-mcp",
+  "version": "2.2.0",
+  "description": "讓 AI 助手（Claude Code / Cursor）直接讀寫 LiteJira 工單系統的 MCP server",
+  "type": "commonjs",
+  "bin": {
+    "litejira-mcp": "litejira-mcp-launch.cjs"
+  },
+  "main": "litejira-mcp-server.js",
+  "files": [
+    "litejira-mcp-launch.cjs",
+    "litejira-mcp-server.js",
+    "ltj-cli.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "litejira",
+    "claude",
+    "claude-code"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UNTAG-LAB/litejira-mcp.git"
+  },
+  "homepage": "https://github.com/UNTAG-LAB/litejira-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/UNTAG-LAB/litejira-mcp/issues"
+  },
+  "license": "MIT",
+  "author": "UNTAG-LAB",
+  "dependencies": {}
+}

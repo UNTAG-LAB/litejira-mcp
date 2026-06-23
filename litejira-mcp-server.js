@@ -23,7 +23,7 @@ const ENUM_UPDATE_FIELDS = [
   'title', 'priority', 'version', 'dueDate', 'startDate',
   'description', 'notes', 'subtype', 'tags', 'mrUrl',
   'reproSteps', 'expectedResult', 'verifyMethod', 'fixMethod',
-  'verifiableVersion', 'foundVersion', 'module', 'parentId',
+  'verifiableVersionAlpha', 'verifiableVersionRelease', 'foundVersion', 'module', 'parentId',
   'stdLevel2', 'stdLevel3',
   'status', 'assignee'
 ];
@@ -41,8 +41,18 @@ const P_IDEMPOTENCY = {
   pattern: '^[a-zA-Z0-9_-]{16,64}$'
 };
 const P_EXPECTED_UPDATED_AT = { type: 'number', description: '樂觀鎖：上一次讀到的 updatedAt（ms timestamp），用於偵測併寫衝突' };
+// LJ-178：批量工具共用 — 工單 ID 陣列（1-100 張，逐張走與單張相同的後端路徑）
+const P_IDS = {
+  type: 'array',
+  description: '工單 ID 陣列（1-100 張，皆 PREFIX-NNN）。一發呼叫由伺服器內部迴圈處理全部，取代逐張單獨呼叫。',
+  items: { type: 'string', pattern: TICKET_ID_PATTERN },
+  minItems: 1,
+  maxItems: 100
+};
+// LJ-178：批量改欄位白名單（對齊後端 batchSetField，status 請走 batchTransition）
+const ENUM_BATCH_FIELDS = ['priority', 'version', 'module', 'parentId'];
 
-// ── LJ-095 v2 + LJ-116：Tool 定義（12 個） ──
+// ── LJ-095 v2 + LJ-116：Tool 定義（12 個）+ LJ-178 批量（3 個）──
 const TOOL_DEFS = [
   // 既有保留（7 個）
   tool('litejira.searchTickets',
@@ -129,10 +139,10 @@ const TOOL_DEFS = [
       title: '附加 URL 連結'
     }),
   tool('litejira.updateField',
-    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersion, foundVersion, module, parentId, stdLevel2, stdLevel3, status, assignee. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee follows member validation. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」.',
+    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, status, assignee. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee follows member validation. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」.',
     'updateField', true, {
       ticketId: P_TICKET_ID,
-      field: { type: 'string', description: 'Whitelist 欄位名（22 個合法值）', enum: ENUM_UPDATE_FIELDS },
+      field: { type: 'string', description: 'Whitelist 欄位名（23 個合法值）', enum: ENUM_UPDATE_FIELDS },
       value: { type: ['string', 'number', 'null'], description: '新值。型別依 field 而定：status/subtype/module 等動態值請先讀 litejira://meta；priority 用 P0-緊急/P1-高/P2-中/P3-低；null 代表清空。' },
       force: { type: 'boolean', description: 'LJ-153 管理者強制改狀態：true 時繞過工作流路徑驗證（僅 field=status 可用、僅 admin 放行；目標仍須是該流程組已定義的狀態）。一般流轉請不要帶此參數。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
@@ -236,6 +246,43 @@ const TOOL_DEFS = [
       readOnlyHint: true,
       openWorldHint: true,
       title: '查工單當前可用流轉動作'
+    }),
+  // LJ-178 新增（3 個）：批量操作對外化 — 一發處理 N 張，取代逐張迴圈
+  tool('litejira.batchTransition',
+    'Batch status transition for MANY tickets in ONE call, by action-button label, WITH automatic role-based reassignment (same semantics as litejira.transitionTicket, applied to every id). All tickets SHOULD currently be at the same status so the action label is valid for each — call litejira.searchTickets to filter a same-status batch first. Tickets where the action is not valid (or not found) land in failed[] without aborting the rest (partial success). NO optimistic lock (batch status changes intentionally skip it to avoid concurrent-write conflicts). Returns { success:[{id,status,assignee}], failed:[{id,error}] }.',
+    'batchTransition', true, {
+      ids: P_IDS,
+      action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對全批工單當前狀態須合法；不合法的工單落在 failed[]。合法值依當前狀態而定，請先 litejira.getTransitions 取得。' },
+      extraFields: { type: 'object', description: '連帶欄位（全批共用，不覆蓋 status/assignee），如 BUG 送測填 { fixMethod: "修復說明" }。' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ids', 'action', 'idempotencyKey'], {
+      idempotentHint: true,
+      openWorldHint: true,
+      title: '批量流轉工單狀態（含自動轉派）'
+    }),
+  tool('litejira.batchReassign',
+    'Batch reassign MANY tickets to the SAME new assignee in ONE call, with a shared reason comment. Triggers a notification per ticket. Returns { success:[id], failed:[{id,error}] }. For a single ticket use litejira.reassignTicket.',
+    'batchReassign', true, {
+      ids: P_IDS,
+      newAssignee: { type: 'string', description: '新 assignee 顯示名稱（不是 email）。動態值，請先讀 litejira://members。' },
+      reason: { type: 'string', description: '轉派原因（會作為留言寫入每張工單）' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ids', 'newAssignee', 'reason', 'idempotencyKey'], {
+      idempotentHint: true,
+      openWorldHint: true,
+      title: '批量轉派工單'
+    }),
+  tool('litejira.batchSetField',
+    'Batch set ONE field to the SAME value across MANY tickets in ONE call. Whitelist: priority / version / module / parentId (NOT status — for status use litejira.batchTransition). Goes through the same updateTicket path (workflow/member validation per field). Returns { success:[id], failed:[{id,error}] }.',
+    'batchSetField', true, {
+      ids: P_IDS,
+      field: { type: 'string', description: '批量改的欄位（白名單 4 個）。status 不在此 — 改狀態請用 litejira.batchTransition。', enum: ENUM_BATCH_FIELDS },
+      value: { type: ['string', 'number', 'null'], description: '新值（全批共用）。priority 用 P0-緊急/P1-高/P2-中/P3-低；version/module 動態值請先讀 litejira://meta；parentId 為 PREFIX-NNN 或 null 解除掛載。' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ids', 'field', 'idempotencyKey'], {
+      destructiveHint: true,
+      openWorldHint: true,
+      title: '批量改工單欄位'
     })
 ];
 
@@ -404,10 +451,11 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           instructions: [
             `LiteJira MCP server v${PKG_VER_SHORT}：`,
             '',
-            '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket 共 10 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
+            '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket / batchTransition / batchReassign / batchSetField 共 13 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
             '- 合法 enum 值請先讀 resource litejira://meta（types / priorities / subtypes / modules / statusMeta / kanbanColumnsByType）',
             '- 工作流轉換規則請讀 litejira://workflow/{type}',
             '- 轉狀態（含依 role 自動轉派負責人，等同 webapp 動作按鈕）：先 litejira.getTransitions 取當前可用動作 → litejira.transitionTicket(action=動作標籤)。updateField(field=status) 只改狀態、不轉派',
+            '- 批量（一次改多張）：同狀態多張推進用 litejira.batchTransition(ids[], action)（含自動轉派，部分失敗回 failed[]）；多張轉派同一人用 litejira.batchReassign(ids[], newAssignee, reason)；多張改 version/priority/module 用 litejira.batchSetField(ids[], field, value)。一發呼叫取代逐張迴圈',
             '- STD 工單（客服申訴）建立必帶 stdLevel2 + stdLevel3，可選值見 litejira://meta',
             '- 工單清單請用 litejira.searchTickets 分頁 + cursor，不要 enumerate 個別 ticket resource',
             '- limit 參數上限 100，超過會被 schema 擋下',
@@ -508,6 +556,18 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
 function matchesSchema_(value, schema) {
   const types = Array.isArray(schema.type) ? schema.type : [schema.type];
   if (value === null) return types.indexOf('null') !== -1;
+  // LJ-178: array 型別必須先攔（typeof [] === 'object'，否則會被下方 jsType 檢查誤殺）
+  if (types.indexOf('array') !== -1) {
+    if (!Array.isArray(value)) return false;
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) return false;
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return false;
+    if (schema.items) {
+      for (var i = 0; i < value.length; i++) {
+        if (!matchesSchema_(value[i], schema.items)) return false;
+      }
+    }
+    return true;
+  }
   const jsType = typeof value;
   if (types.indexOf(jsType) === -1) {
     // integer 也走 number 路徑

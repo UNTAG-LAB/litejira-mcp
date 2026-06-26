@@ -138,6 +138,17 @@ const TOOL_DEFS = [
       openWorldHint: true,
       title: '附加 URL 連結'
     }),
+  tool('litejira.removeAttachment',
+    'Remove a previously attached reference URL from a ticket\'s attachment list, matched by url. Idempotent: removing a url that is not attached returns removed:false without error. NOT for MR/PR links — those live in the mrUrl field.',
+    'removeAttachment', true, {
+      ticketId: P_TICKET_ID,
+      url: { type: 'string', description: '要移除的附件 URL（以 attachLink 當初附上的 url 為準）' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'url', 'idempotencyKey'], {
+      destructiveHint: true,
+      openWorldHint: true,
+      title: '移除附件連結'
+    }),
   tool('litejira.updateField',
     'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, status, assignee. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee follows member validation. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」.',
     'updateField', true, {
@@ -451,7 +462,7 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           instructions: [
             `LiteJira MCP server v${PKG_VER_SHORT}：`,
             '',
-            '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket / batchTransition / batchReassign / batchSetField 共 13 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
+            '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / removeAttachment / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket / batchTransition / batchReassign / batchSetField 共 14 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
             '- 合法 enum 值請先讀 resource litejira://meta（types / priorities / subtypes / modules / statusMeta / kanbanColumnsByType）',
             '- 工作流轉換規則請讀 litejira://workflow/{type}',
             '- 轉狀態（含依 role 自動轉派負責人，等同 webapp 動作按鈕）：先 litejira.getTransitions 取當前可用動作 → litejira.transitionTicket(action=動作標籤)。updateField(field=status) 只改狀態、不轉派',

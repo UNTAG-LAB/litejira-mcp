@@ -1,6 +1,6 @@
 {
   "name": "litejira-mcp",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "讓 AI 助手（Claude Code / Cursor）直接讀寫 LiteJira 工單系統的 MCP server",
   "type": "commonjs",
   "bin": {

@@ -247,12 +247,13 @@ const TOOL_DEFS = [
     }),
   // LJ-137 新增（2 個）：動作按鈕流轉對外化 + 查當前可用動作
   tool('litejira.transitionTicket',
-    'One-shot status transition by action-button label, WITH automatic role-based reassignment (首次認領→點按者 / 回流→上一手開發者 / 前進→目標 role 預設人). Equivalent to the webapp Drawer action buttons. The "action" label must be one currently available for the ticket — call litejira.getTransitions FIRST to get valid labels. To set status WITHOUT auto-reassign use updateField(field=\'status\') instead.',
+    'One-shot status transition by action-button label, WITH automatic role-based reassignment (首次認領→點按者 / 回流→上一手開發者 / 前進→目標 role 預設人). Equivalent to the webapp Drawer action buttons. The "action" label must be one currently available for the ticket — call litejira.getTransitions FIRST to get valid labels. To set status WITHOUT auto-reassign use updateField(field=\'status\') instead. 退回類動作（getTransitions 回傳 direction=back，如 alpha不通過/release不通過/MR打回/退回/退單）必須帶 reason，否則後端拒絕（GH-215：原因會記入工單歷程供被打回的開發者查看）。',
     'transitionTicket', true, {
       ticketId: P_TICKET_ID,
       action: { type: 'string', description: '動作標籤（如「開始開發」「送alpha測試」「alpha不通過」）。合法值依工單當前狀態而定，請先呼叫 litejira.getTransitions 取得。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       extraFields: { type: 'object', description: '連帶欄位（不覆蓋 status/assignee），如 BUG 送測填 { fixMethod: "修復說明" }。' },
+      reason: { type: 'string', description: 'GH-215：退回類動作（direction=back）必填的原因，說明測試哪裡不通過；會記入工單歷程。前進類動作可省略。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'action', 'idempotencyKey'], {
       idempotentHint: true,
@@ -270,11 +271,12 @@ const TOOL_DEFS = [
     }),
   // LJ-178 新增（3 個）：批量操作對外化 — 一發處理 N 張，取代逐張迴圈
   tool('litejira.batchTransition',
-    'Batch status transition for MANY tickets in ONE call, by action-button label, WITH automatic role-based reassignment (same semantics as litejira.transitionTicket, applied to every id). All tickets SHOULD currently be at the same status so the action label is valid for each — call litejira.searchTickets to filter a same-status batch first. Tickets where the action is not valid (or not found) land in failed[] without aborting the rest (partial success). NO optimistic lock (batch status changes intentionally skip it to avoid concurrent-write conflicts). Returns { success:[{id,status,assignee}], failed:[{id,error}] }.',
+    'Batch status transition for MANY tickets in ONE call, by action-button label, WITH automatic role-based reassignment (same semantics as litejira.transitionTicket, applied to every id). All tickets SHOULD currently be at the same status so the action label is valid for each — call litejira.searchTickets to filter a same-status batch first. Tickets where the action is not valid (or not found) land in failed[] without aborting the rest (partial success). NO optimistic lock (batch status changes intentionally skip it to avoid concurrent-write conflicts). Returns { success:[{id,status,assignee}], failed:[{id,error}] }. 退回類動作（direction=back）須帶 reason，否則每張落 failed[]（GH-215）。',
     'batchTransition', true, {
       ids: P_IDS,
       action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對全批工單當前狀態須合法；不合法的工單落在 failed[]。合法值依當前狀態而定，請先 litejira.getTransitions 取得。' },
       extraFields: { type: 'object', description: '連帶欄位（全批共用，不覆蓋 status/assignee），如 BUG 送測填 { fixMethod: "修復說明" }。' },
+      reason: { type: 'string', description: 'GH-215：退回類動作（direction=back）必填的原因，批次共用；會記入每張工單歷程。前進類動作可省略。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ids', 'action', 'idempotencyKey'], {
       idempotentHint: true,

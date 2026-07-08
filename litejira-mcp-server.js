@@ -159,12 +159,13 @@ const TOOL_DEFS = [
       title: '移除附件連結'
     }),
   tool('litejira.updateField',
-    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee follows member validation. releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」.',
+    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee follows member validation. releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
     'updateField', true, {
       ticketId: P_TICKET_ID,
       field: { type: 'string', description: 'Whitelist 欄位名（24 個合法值）', enum: ENUM_UPDATE_FIELDS },
       value: { type: ['string', 'number', 'null'], description: '新值。型別依 field 而定：status/subtype/module 等動態值請先讀 litejira://meta；priority 用 P0-緊急/P1-高/P2-中/P3-低；releaseMethod 用 待定/熱更/換包/停服（發布方式，送測必填非待定）；null 代表清空。' },
       force: { type: 'boolean', description: 'LJ-153 管理者強制改狀態：true 時繞過工作流路徑驗證（僅 field=status 可用、僅 admin 放行；目標仍須是該流程組已定義的狀態）。一般流轉請不要帶此參數。' },
+      reason: { type: 'string', description: 'GH-234：改 field=version 且新舊版本不同時必填（後端 version_reason_required 守衛，LJ-168），說明為何改版本；會記入工單歷程。其他欄位可省略。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'field', 'idempotencyKey'], {

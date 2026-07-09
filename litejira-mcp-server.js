@@ -34,7 +34,8 @@ const ENUM_UPDATE_FIELDS = [
   'verifiableVersionAlpha', 'verifiableVersionRelease', 'foundVersion', 'module', 'parentId',
   'stdLevel2', 'stdLevel3',
   'releaseMethod', // LJ-184 發布方式（待定/熱更/換包/停服）
-  'status', 'assignee'
+  'status', 'assignee',
+  'owner' // GH-242 負責人（最終負責人，固定，可空；null 清空）
 ];
 
 // LJ-116: 常用參數 schema（給多個工具引用，集中維護）
@@ -70,7 +71,8 @@ const TOOL_DEFS = [
       q: { type: 'string', description: 'Keyword search across title + description' },
       type: { type: 'string', description: 'Filter by ticket type', enum: ENUM_TYPES },
       status: { type: 'string', description: 'Filter by status. 動態值依工單 type 而定，請先讀 litejira://workflow/{type}。' },
-      assignee: { type: 'string', description: 'Filter by assignee 顯示名稱（不是 email）' },
+      assignee: { type: 'string', description: 'Filter by assignee 處理人顯示名稱（不是 email）' },
+      owner: { type: 'string', description: 'GH-242 Filter by owner 負責人（最終負責人）顯示名稱（不是 email）' },
       creator: { type: 'string', description: 'Filter by creator 顯示名稱' },
       version: { type: 'string', description: 'Filter by 目標版本（version name）' },
       module: { type: 'string', description: 'Filter by module 模塊。動態值，請先讀 litejira://meta。' },
@@ -159,10 +161,10 @@ const TOOL_DEFS = [
       title: '移除附件連結'
     }),
   tool('litejira.updateField',
-    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee follows member validation. releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
+    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee, owner. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee (處理人) follows member validation. GH-242: field=\'owner\'（負責人 / 最終負責人，固定，不隨狀態流轉變化）可設成員名或清空（value=null / ""）；與 assignee 處理人區分。releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
     'updateField', true, {
       ticketId: P_TICKET_ID,
-      field: { type: 'string', description: 'Whitelist 欄位名（24 個合法值）', enum: ENUM_UPDATE_FIELDS },
+      field: { type: 'string', description: 'Whitelist 欄位名（25 個合法值）', enum: ENUM_UPDATE_FIELDS },
       value: { type: ['string', 'number', 'null'], description: '新值。型別依 field 而定：status/subtype/module 等動態值請先讀 litejira://meta；priority 用 P0-緊急/P1-高/P2-中/P3-低；releaseMethod 用 待定/熱更/換包/停服（發布方式，送測必填非待定）；null 代表清空。' },
       force: { type: 'boolean', description: 'LJ-153 管理者強制改狀態：true 時繞過工作流路徑驗證（僅 field=status 可用、僅 admin 放行；目標仍須是該流程組已定義的狀態）。一般流轉請不要帶此參數。' },
       reason: { type: 'string', description: 'GH-234：改 field=version 且新舊版本不同時必填（後端 version_reason_required 守衛，LJ-168），說明為何改版本；會記入工單歷程。其他欄位可省略。' },
@@ -180,7 +182,8 @@ const TOOL_DEFS = [
       type: { type: 'string', description: '工單類型', enum: ENUM_TYPES },
       title: { type: 'string', description: '工單標題' },
       priority: { type: 'string', description: '優先級（含中文後綴）', enum: ENUM_PRIORITIES },
-      assignee: { type: 'string', description: 'Member 顯示名稱（不是 email）；省略則自動指派' },
+      assignee: { type: 'string', description: 'Member 顯示名稱（不是 email）；省略則自動指派（處理人）' },
+      owner: { type: 'string', description: 'GH-242 負責人（最終負責人，固定）顯示名稱（不是 email）；省略留空，之後首次進入開發/進行中類狀態自動補為推進者' },
       version: { type: 'string', description: '目標版本' },
       description: { type: 'string', description: '工單描述 / body（Markdown 支援）' },
       subtype: { type: 'string', description: '子類型。動態值依 type 而定，請先讀 litejira://meta。' },

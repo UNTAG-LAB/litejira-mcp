@@ -161,7 +161,7 @@ const TOOL_DEFS = [
       title: '移除附件連結'
     }),
   tool('litejira.updateField',
-    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee, owner. For MR/PR links: field=\'mrUrl\'. Status follows workflow validation. Assignee (處理人) follows member validation. GH-242: field=\'owner\'（負責人 / 最終負責人，固定，不隨狀態流轉變化）可設成員名或清空（value=null / ""）；與 assignee 處理人區分。releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. NOTE: field=\'status\' here ONLY sets the status and does NOT auto-reassign the owner — for a webapp-style transition that also reassigns by role, use litejira.transitionTicket instead. ADMIN ONLY: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
+    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee, owner. For MR/PR links: field=\'mrUrl\'. Assignee (處理人) follows member validation; LJ-188/GH-249: changing assignee here also notifies old+new assignee via team Chat (same as reassignTicket, without a reason comment). GH-242: field=\'owner\'（負責人 / 最終負責人，固定，不隨狀態流轉變化）可設成員名或清空（value=null / ""）；與 assignee 處理人區分。releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. LJ-188 WELDED: field=\'status\' WITHOUT force is REJECTED (use_transitionTicket) — all normal transitions MUST go through litejira.transitionTicket (carries send-test 3-field gate 發布方式/修復方式/驗證方式 + role auto-reassign + notification). ADMIN ONLY escape hatch: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
     'updateField', true, {
       ticketId: P_TICKET_ID,
       field: { type: 'string', description: 'Whitelist 欄位名（25 個合法值）', enum: ENUM_UPDATE_FIELDS },
@@ -256,7 +256,7 @@ const TOOL_DEFS = [
       ticketId: P_TICKET_ID,
       action: { type: 'string', description: '動作標籤（如「開始開發」「送alpha測試」「alpha不通過」）。合法值依工單當前狀態而定，請先呼叫 litejira.getTransitions 取得。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
-      extraFields: { type: 'object', description: '連帶欄位（不覆蓋 status/assignee），如 BUG 送測填 { fixMethod: "修復說明" }。' },
+      extraFields: { type: 'object', description: '連帶欄位（不覆蓋 status/assignee）。LJ-188 送測（進 alpha/release 測試 / 熱修待合 release）三欄必備，缺項在此帶入：{ fixMethod: "修復方式", verifyMethod: "驗證方式", releaseMethod: "熱更/換包/停服" }。' },
       reason: { type: 'string', description: 'GH-215：退回類動作（direction=back）必填的原因，說明測試哪裡不通過；會記入工單歷程。前進類動作可省略。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'action', 'idempotencyKey'], {
@@ -279,7 +279,7 @@ const TOOL_DEFS = [
     'batchTransition', true, {
       ids: P_IDS,
       action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對全批工單當前狀態須合法；不合法的工單落在 failed[]。合法值依當前狀態而定，請先 litejira.getTransitions 取得。' },
-      extraFields: { type: 'object', description: '連帶欄位（全批共用，不覆蓋 status/assignee），如 BUG 送測填 { fixMethod: "修復說明" }。' },
+      extraFields: { type: 'object', description: '連帶欄位（全批共用，不覆蓋 status/assignee）。LJ-188 送測三欄必備，缺項在此帶入：{ fixMethod: "修復方式", verifyMethod: "驗證方式", releaseMethod: "熱更/換包/停服" }。' },
       reason: { type: 'string', description: 'GH-215：退回類動作（direction=back）必填的原因，批次共用；會記入每張工單歷程。前進類動作可省略。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ids', 'action', 'idempotencyKey'], {
@@ -481,7 +481,7 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / removeAttachment / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket / batchTransition / batchReassign / batchSetField 共 14 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
             '- 合法 enum 值請先讀 resource litejira://meta（types / priorities / subtypes / modules / statusMeta / kanbanColumnsByType）',
             '- 工作流轉換規則請讀 litejira://workflow/{type}',
-            '- 轉狀態（含依 role 自動轉派負責人，等同 webapp 動作按鈕）：先 litejira.getTransitions 取當前可用動作 → litejira.transitionTicket(action=動作標籤)。updateField(field=status) 只改狀態、不轉派',
+            '- 轉狀態（含依 role 自動轉派負責人，等同 webapp 動作按鈕）：先 litejira.getTransitions 取當前可用動作 → litejira.transitionTicket(action=動作標籤)。LJ-188：updateField(field=status) 已焊死（僅 admin 帶 force=true 例外）；送測（進 alpha 測試 / release 測試 / 熱修待合 release）須 發布方式/修復方式/驗證方式 三欄齊備，缺項經 extraFields 一併帶入',
             '- 批量（一次改多張）：同狀態多張推進用 litejira.batchTransition(ids[], action)（含自動轉派，部分失敗回 failed[]）；多張轉派同一人用 litejira.batchReassign(ids[], newAssignee, reason)；多張改 version/priority/module 用 litejira.batchSetField(ids[], field, value)。一發呼叫取代逐張迴圈',
             '- STD 工單（客服申訴）建立必帶 stdLevel2 + stdLevel3，可選值見 litejira://meta',
             '- 工單清單請用 litejira.searchTickets 分頁 + cursor，不要 enumerate 個別 ticket resource',

@@ -265,7 +265,7 @@ const TOOL_DEFS = [
       title: '流轉工單狀態（動作按鈕，含自動轉派）'
     }),
   tool('litejira.getTransitions',
-    'Get the currently available action-button transitions for a ticket (by its current status). Returns { status, actions: [{ label, toStatus, direction }], isFinal }. Feed the returned actions[].label into litejira.transitionTicket as the "action" arg.',
+    'Get the currently available action-button transitions for a ticket (by its current status). Returns { group, status, transitions, actions: [{ label, toStatus, direction }], isFinal }. ONLY actions[].label is a valid "action" arg for litejira.transitionTicket / litejira.batchTransition. GH-253: the "transitions" array is NOT an action list — it is the backend validation whitelist of target STATUS names (non-final states always include 廢單/退單 even when no such button exists for that type), and its values differ from action labels (e.g. BUG at 待開發 → transitions = 開發中/已取消/廢單/退單, actions = 開始開發/取消). Sending a transitions[] value as "action" will be rejected.',
     'getAllowedTransitions', false, {
       ticketId: P_TICKET_ID
     }, ['ticketId'], {

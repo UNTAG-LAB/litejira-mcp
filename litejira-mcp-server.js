@@ -315,7 +315,8 @@ const TOOL_DEFS = [
 
 // ── LJ-095 v2：Resource 定義（6 個） ──
 const RESOURCE_DEFS = [
-  { uri: 'litejira://meta', name: 'LiteJira 元資料', description: '類型/優先級/子類型/模塊清單', action: 'getMeta' },
+  // GH-255：說明對齊實際回傳（流轉規則已移出 meta，改由 workflow 資源提供）
+  { uri: 'litejira://meta', name: 'LiteJira 元資料', description: '類型/優先級/狀態/子類型/模塊/STD類目清單（不含流轉規則，見 workflow 資源）', action: 'getMeta' },
   { uri: 'litejira://members', name: '成員清單', description: '啟用成員（name/email/role）', action: 'getMembers' },
   { uri: 'litejira://versions', name: '版本清單', description: '版本列表（name/status/dates）', action: 'getVersions' },
   { uri: 'litejira://dashboard', name: 'Dashboard 統計', description: '各狀態計數、逾期數', action: 'getDashboardStats' },
@@ -428,7 +429,8 @@ async function callTool(name, args, config, fetchImpl) {
   // LJ-116 批次 4 (H5): 雙寫 — text fallback 給老主機、structuredContent 給新主機
   const data = envelope.data || {};
   return {
-    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+    // GH-255：緊湊輸出。縮排只服務人眼，AI 一樣能解析，實測膨脹 52%（35.1KB → 53.5KB）
+    content: [{ type: 'text', text: JSON.stringify(data) }],
     structuredContent: data
   };
 }
@@ -479,8 +481,8 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             `LiteJira MCP server v${PKG_VER_SHORT}：`,
             '',
             '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / removeAttachment / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket / batchTransition / batchReassign / batchSetField 共 14 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
-            '- 合法 enum 值請先讀 resource litejira://meta（types / priorities / subtypes / modules / statusMeta / kanbanColumnsByType）',
-            '- 工作流轉換規則請讀 litejira://workflow/{type}',
+            '- 合法 enum 值請先讀 resource litejira://meta（types / convertibleTypes / priorities / statuses / statusMeta / subtypes / modules / stdCategories）',
+            '- 工作流轉換規則與看板欄位請讀 litejira://workflow/{type}（GH-255：flowRows / transitionsMap / kanbanColumns 已移出 meta，避免每次讀 meta 都吞 6 種類型的完整流程表）',
             '- 轉狀態（含依 role 自動轉派負責人，等同 webapp 動作按鈕）：先 litejira.getTransitions 取當前可用動作 → litejira.transitionTicket(action=動作標籤)。LJ-188：updateField(field=status) 已焊死（僅 admin 帶 force=true 例外）；送測（進 alpha 測試 / release 測試 / 熱修待合 release）須 發布方式/修復方式/驗證方式 三欄齊備，缺項經 extraFields 一併帶入',
             '- 批量（一次改多張）：同狀態多張推進用 litejira.batchTransition(ids[], action)（含自動轉派，部分失敗回 failed[]）；多張轉派同一人用 litejira.batchReassign(ids[], newAssignee, reason)；多張改 version/priority/module 用 litejira.batchSetField(ids[], field, value)。一發呼叫取代逐張迴圈',
             '- STD 工單（客服申訴）建立必帶 stdLevel2 + stdLevel3，可選值見 litejira://meta',
@@ -687,7 +689,8 @@ async function readResource_(uri, config, fetchImpl) {
     contents: [{
       uri: uri,
       mimeType: 'application/json',
-      text: JSON.stringify(envelope.data || {}, null, 2)
+      // GH-255：緊湊輸出（同 sendToolResult_，見該處註解）
+      text: JSON.stringify(envelope.data || {})
     }]
   };
 }

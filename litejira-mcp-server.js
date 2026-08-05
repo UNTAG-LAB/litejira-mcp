@@ -5,7 +5,6 @@ const { postLiteJiraApi } = require('./ltj-cli');
 
 // LJ-160 #2：版本號單一事實源 = package.json，避免手寫在多處漂移。
 const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
-const PKG_VER_SHORT = PKG_VERSION.split('.').slice(0, 2).join('.'); // 例 "2.3"
 
 // LJ-134: 工單 ID regex（PREFIX-NNN）。試算表工單前綴僅限 FB/BUG/REQ/EPIC/IDEA/TASK/STD。
 // 命名空間紀律（根 CLAUDE.md）：LJ/DEV 是 LiteJira「自身開發」編號，事實源在 BACKLOG.md，
@@ -19,6 +18,7 @@ const ENUM_CONVERTIBLE_TYPES = ['EPIC', 'REQ', 'BUG', 'IDEA', 'TASK']; // STD �
 const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中文後綴
 const ENUM_ORDER = ['asc', 'desc'];
 const ENUM_SORT = ['createdAt', 'updatedAt', 'priority', 'dueDate'];
+const ENUM_SEARCH_RESPONSE_MODE = ['count', 'compact', 'full'];
 // LJ-184：發布方式 enum（對齊 webapp/Code.js UPDATE_FIELD_WHITELIST + transitionTicket 送測守衛）
 const ENUM_RELEASE_METHOD = ['待定', '熱更', '換包', '停服'];
 // LJ-184：createTicket / updateField 共用的 releaseMethod 參數 schema（集中維護，避免兩處漂移）
@@ -66,7 +66,7 @@ const ENUM_BATCH_FIELDS = ['priority', 'version', 'module', 'parentId'];
 const TOOL_DEFS = [
   // 既有保留（7 個）
   tool('litejira.searchTickets',
-    'Search and filter tickets. Returns summary fields (16 cols). For full detail use litejira://ticket/{id} resource.',
+    'Search and filter tickets. Defaults to compact 12-field items; use responseMode=count for totals, responseMode=full only when list-level full fields are required, or litejira://ticket/{id} for one complete ticket.',
     'searchTickets', false, {
       q: { type: 'string', description: 'Keyword search across title + description' },
       type: { type: 'string', description: 'Filter by ticket type', enum: ENUM_TYPES },
@@ -77,6 +77,12 @@ const TOOL_DEFS = [
       version: { type: 'string', description: 'Filter by 目標版本（version name）' },
       module: { type: 'string', description: 'Filter by module 模塊。動態值，請先讀 litejira://meta。' },
       subtype: { type: 'string', description: 'Filter by subtype 子類型。動態值依 type 而定，請先讀 litejira://meta。' },
+      responseMode: {
+        type: 'string',
+        description: 'Response size: count=只回總數，compact=12 個核心欄位（MCP 預設），full=既有完整清單欄位',
+        enum: ENUM_SEARCH_RESPONSE_MODE,
+        default: 'compact'
+      },
       limit: P_LIMIT,
       cursor: P_CURSOR,
       sort: { type: 'string', description: 'Sort field', enum: ENUM_SORT },
@@ -405,6 +411,10 @@ async function callTool(name, args, config, fetchImpl) {
   if (def.write && !cfg.enableWrites) throw mcpError_('WRITES_DISABLED', 'write tools require LTJ_MCP_ENABLE_WRITES=true');
 
   const params = validateToolInput(def, args || {});
+  // GH-265：只在 MCP 邊界預設 compact；後端 API 未帶參數時仍維持 full 相容契約。
+  if (def.action === 'searchTickets' && params.responseMode === undefined) {
+    params.responseMode = 'compact';
+  }
   if (def.write && !params.idempotencyKey) {
     throw mcpError_('IDEMPOTENCY_KEY_REQUIRED', 'write tools require idempotencyKey', undefined, -32602);
   }
@@ -476,20 +486,15 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             prompts: { listChanged: false }
           },
           serverInfo: { name: 'litejira-mcp', version: PKG_VERSION },
-          // LJ-116: instructions — server-capabilities skill 說「整個 spec 槓桿最高的一行」
+          // GH-265：啟動指令只保留操作安全規則，歷史背景留在規格文件，避免每個 session 重複載入。
           instructions: [
-            `LiteJira MCP server v${PKG_VER_SHORT}：`,
-            '',
-            '- 寫入工具（createTicket / updateField / linkTickets / addComment / attachLink / removeAttachment / replyFeedback / reassignTicket / convertTicketType / toggleWatch / transitionTicket / batchTransition / batchReassign / batchSetField 共 14 個）必傳 idempotencyKey（16-64 字元 alphanumeric/_/-），retry 同語意操作請傳同一 key',
-            '- 合法 enum 值請先讀 resource litejira://meta（types / convertibleTypes / priorities / statuses / statusMeta / subtypes / modules / stdCategories）',
-            '- 工作流轉換規則與看板欄位請讀 litejira://workflow/{type}（GH-255：flowRows / transitionsMap / kanbanColumns 已移出 meta，避免每次讀 meta 都吞 6 種類型的完整流程表）',
-            '- 轉狀態（含依 role 自動轉派負責人，等同 webapp 動作按鈕）：先 litejira.getTransitions 取當前可用動作 → litejira.transitionTicket(action=動作標籤)。LJ-188：updateField(field=status) 已焊死（僅 admin 帶 force=true 例外）；送測（進 alpha 測試 / release 測試 / 熱修待合 release）須 發布方式/修復方式/驗證方式 三欄齊備，缺項經 extraFields 一併帶入',
-            '- 批量（一次改多張）：同狀態多張推進用 litejira.batchTransition(ids[], action)（含自動轉派，部分失敗回 failed[]）；多張轉派同一人用 litejira.batchReassign(ids[], newAssignee, reason)；多張改 version/priority/module 用 litejira.batchSetField(ids[], field, value)。一發呼叫取代逐張迴圈',
-            '- STD 工單（客服申訴）建立必帶 stdLevel2 + stdLevel3，可選值見 litejira://meta',
-            '- 工單清單請用 litejira.searchTickets 分頁 + cursor，不要 enumerate 個別 ticket resource',
-            '- limit 參數上限 100，超過會被 schema 擋下',
-            '- 工單 ID 格式 PREFIX-NNN（PREFIX ∈ {FB, BUG, REQ, EPIC, IDEA, TASK, STD}）。LJ/DEV 是 LiteJira 自身開發編號（BACKLOG.md），非試算表工單、不接受',
-            '- priority 含中文後綴：P0-緊急 / P1-高 / P2-中 / P3-低（不是純 P0/P1）'
+            'LiteJira MCP 操作規則：',
+            '- 所有寫入都要帶 16-64 字元 idempotencyKey；重試沿用同一 key。',
+            '- 受控值讀 litejira://meta，成員讀 litejira://members，版本讀 litejira://versions；STD 建單另需 stdLevel2、stdLevel3。',
+            '- 狀態流轉先呼叫 litejira.getTransitions，再以 actions[].label 呼叫 litejira.transitionTicket；不可用 updateField 裸改 status。送測須備發布方式、修復方式、驗證方式。',
+            '- 多張同類操作用 batchTransition、batchReassign、batchSetField；清單用 searchTickets + cursor，預設 compact，只問數量用 responseMode=count。limit 上限 100。',
+            '- 工單 ID 僅接受 FB/BUG/REQ/EPIC/IDEA/TASK/STD-NNN；LJ/DEV 不是試算表工單。',
+            '- priority 必須填完整值：P0-緊急、P1-高、P2-中、P3-低。'
           ].join('\n')
         }
       };

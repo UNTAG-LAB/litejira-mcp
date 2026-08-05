@@ -7,6 +7,9 @@
     "litejira-mcp": "litejira-mcp-launch.cjs"
   },
   "main": "litejira-mcp-server.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "litejira-mcp-launch.cjs",
     "litejira-mcp-server.js",

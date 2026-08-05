@@ -105,6 +105,8 @@ LTJ_MCP_ENABLE_WRITES=true
 
 AI 會自動載入成員清單、版本列表、工作流規則。
 
+搜尋預設使用 `compact` 模式，每張只回 12 個清單判讀需要的核心欄位，降低大型結果對 AI 上下文的占用。只需要數量時可指定 `responseMode=count`；只有確實需要清單完整欄位時才用 `responseMode=full`，單張完整內容優先讀 `litejira://ticket/{id}`。
+
 ---
 
 ## 故障排除

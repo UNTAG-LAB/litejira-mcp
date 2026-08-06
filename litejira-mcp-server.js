@@ -171,7 +171,7 @@ const TOOL_DEFS = [
     'updateField', true, {
       ticketId: P_TICKET_ID,
       field: { type: 'string', description: 'Whitelist 欄位名（25 個合法值）', enum: ENUM_UPDATE_FIELDS },
-      value: { type: ['string', 'number', 'null'], description: '新值。型別依 field 而定：status/subtype/module 等動態值請先讀 litejira://meta；priority 用 P0-緊急/P1-高/P2-中/P3-低；releaseMethod 用 待定/熱更/換包/停服（發布方式，送測必填非待定）；null 代表清空。' },
+      value: { type: ['string', 'number', 'null'], description: '新值。型別依 field 而定：status/subtype/module 等動態值請先讀 litejira://meta；version 動態值請先讀 litejira://versions（GH-229：合法版本清單只在此資源，meta 不含版本；後端不會擋臆造字串，寫錯不會報錯）；priority 用 P0-緊急/P1-高/P2-中/P3-低；releaseMethod 用 待定/熱更/換包/停服（發布方式，送測必填非待定）；null 代表清空。' },
       force: { type: 'boolean', description: 'LJ-153 管理者強制改狀態：true 時繞過工作流路徑驗證（僅 field=status 可用、僅 admin 放行；目標仍須是該流程組已定義的狀態）。一般流轉請不要帶此參數。' },
       reason: { type: 'string', description: 'GH-234：改 field=version 且新舊版本不同時必填（後端 version_reason_required 守衛，LJ-168），說明為何改版本；會記入工單歷程。其他欄位可省略。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
@@ -190,7 +190,7 @@ const TOOL_DEFS = [
       priority: { type: 'string', description: '優先級（含中文後綴）', enum: ENUM_PRIORITIES },
       assignee: { type: 'string', description: 'Member 顯示名稱（不是 email）；省略則自動指派（處理人）' },
       owner: { type: 'string', description: 'GH-242 負責人（最終負責人，固定）顯示名稱（不是 email）；省略留空，之後首次進入開發/進行中類狀態自動補為推進者' },
-      version: { type: 'string', description: '目標版本' },
+      version: { type: 'string', description: '目標版本。動態值請先讀 litejira://versions（GH-229：合法版本清單只在此資源，meta 不含版本；後端不會擋臆造字串，寫錯不會報錯）' },
       description: { type: 'string', description: '工單描述 / body（Markdown 支援）' },
       subtype: { type: 'string', description: '子類型。動態值依 type 而定，請先讀 litejira://meta。' },
       module: { type: 'string', description: '模塊。動態值，請先讀 litejira://meta。' },
@@ -310,7 +310,7 @@ const TOOL_DEFS = [
     'batchSetField', true, {
       ids: P_IDS,
       field: { type: 'string', description: '批量改的欄位（白名單 4 個）。status 不在此 — 改狀態請用 litejira.batchTransition。', enum: ENUM_BATCH_FIELDS },
-      value: { type: ['string', 'number', 'null'], description: '新值（全批共用）。priority 用 P0-緊急/P1-高/P2-中/P3-低；version/module 動態值請先讀 litejira://meta；parentId 為 PREFIX-NNN 或 null 解除掛載。' },
+      value: { type: ['string', 'number', 'null'], description: '新值（全批共用）。priority 用 P0-緊急/P1-高/P2-中/P3-低；version 動態值請先讀 litejira://versions（GH-229：meta 已不含版本清單）；module 動態值請先讀 litejira://meta；parentId 為 PREFIX-NNN 或 null 解除掛載。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ids', 'field', 'idempotencyKey'], {
       destructiveHint: true,

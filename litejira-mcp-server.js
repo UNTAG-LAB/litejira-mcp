@@ -421,7 +421,8 @@ async function callTool(name, args, config, fetchImpl) {
 
   const fetchFn = fetchImpl || globalThis.fetch;
   if (!fetchFn) throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
-  const envelope = await postLiteJiraApi(fetchFn, cfg.apiUrl, cfg.token, def.action, params);
+  // GH-303：寫入動作不重發第一段（指令碼已執行，重發會讓寫入生效兩次）
+  const envelope = await postLiteJiraApi(fetchFn, cfg.apiUrl, cfg.token, def.action, params, { write: def.write });
   // LJ-116 批次 4 (H4): 業務錯誤改 isError + 帶 next-step hint
   if (!envelope.ok) {
     const apiError = envelope.error || {};
@@ -685,7 +686,8 @@ async function readResource_(uri, config, fetchImpl) {
   if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', 'LTJ_API_URL and LTJ_API_TOKEN are required');
   var fetchFn = fetchImpl || globalThis.fetch;
   var params = def.paramMap ? def.paramMap(uri) : {};
-  var envelope = await postLiteJiraApi(fetchFn, cfg.apiUrl, cfg.token, def.action, params);
+  // GH-303：資源一律唯讀，可安全重發
+  var envelope = await postLiteJiraApi(fetchFn, cfg.apiUrl, cfg.token, def.action, params, { write: false });
   if (!envelope.ok) {
     var apiError = envelope.error || {};
     throw mcpError_(apiError.code || 'API_ERROR', apiError.message || 'LiteJira API error');

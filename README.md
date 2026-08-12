@@ -118,6 +118,7 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |
 | 啟動拋 HTTP 401 + HTML（不是 JSON） | server 端 API 部署存取設定漂移，不是你的問題 → 找 admin |
 | 多開 session 時連不上 | 改用全域安裝（`npm i -g`），不要用 npx |
+| `LiteJira API 傳輸失敗：HTTP 404`（第二段） | Google 側的間歇故障，2.12.0 起會自動重取；仍失敗就把整段錯誤訊息貼進工單，裡面已含最終網址與回應內容 |
 
 零外部相依，只需 Node.js 18+。
 

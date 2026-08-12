@@ -74,8 +74,30 @@ test('GH-303：錯誤訊息帶齊最終網址、內容型別與回應內容', as
       assert.match(err.message, /script\.googleusercontent\.com/, '要看得出最後連到哪個主機');
       assert.match(err.message, /參數已遮蔽/, '查詢字串含臨時憑證，必須遮蔽');
       assert.match(err.message, /text\/html/, '要帶內容型別');
-      assert.match(err.message, /找不到網頁/, '要帶回應內容，這是舊版整段丟掉的東西');
+      assert.match(err.message, /找不到網頁/, '要帶頁面標題，這是分辨兩種失敗的關鍵');
       assert.match(err.message, /requestId/, '要帶 requestId 才對得上伺服器端紀錄');
+      return true;
+    }
+  );
+});
+
+test('GH-303：HTML 錯誤頁只帶標題，不夾帶原始內容（守 LJ-116 的不洩 body）', async () => {
+  // 登入頁把憑證藏在 sanitizeErrorBody_ 認不出的形狀裡（表單欄位 / nonce）
+  const sneaky = '<!DOCTYPE html><html><head><title>登入</title>' +
+    '<script nonce="ltj_secret_nonce_zzz"></script></head>' +
+    '<body><input name="csrf" value="ltj_secret_csrf_zzz"></body></html>';
+  const fetchImpl = async (url, options) => {
+    if ((options && options.method) === 'POST') return reply(302, '', REDIRECT);
+    return reply(401, sneaky, { 'content-type': 'text/html' });
+  };
+
+  await assert.rejects(
+    () => postLiteJiraApi(fetchImpl, 'https://exec', 't', 'searchTickets', {}, { write: true, sleep: noSleep }),
+    (err) => {
+      assert.match(err.message, /標題：登入/, '標題要留下 —— 那是診斷用的');
+      assert.doesNotMatch(err.message, /ltj_secret_nonce_zzz/, 'nonce 不得外洩');
+      assert.doesNotMatch(err.message, /ltj_secret_csrf_zzz/, '表單欄位值不得外洩');
+      assert.doesNotMatch(err.message, /<input/, '不得夾帶原始 HTML');
       return true;
     }
   );

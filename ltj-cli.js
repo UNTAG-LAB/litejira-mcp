@@ -262,13 +262,33 @@ function timeoutSignal_(ms) {
   return AbortSignal.timeout(ms);
 }
 
+// 非 JSON 回應只取 <title>，不夾帶原始內容。
+//
+// LJ-116 當初刻意不回 body（見 tests/lj-116-mcp-schema-strict.test.js 的
+// test_LJ116_ltj_cli_non_json_path）：HTML 登入頁可能夾帶憑證，而 sanitizeErrorBody_
+// 只認得 ltj_pat_ / Bearer / Authorization / Set-Cookie 這幾種形狀，
+// 認不出 <input value="…">、nonce="…" 之類。這個顧慮成立。
+//
+// 但完全不給內容就診斷不了 GH-303。折衷是只取 <title>：實測它已足以分辨兩種失敗
+// （「找不到網頁」= Google 側取結果故障、「LiteJira — 無權限」= 導向鏈繞回 doGet），
+// 而 <title> 不是憑證會出現的位置。取出來仍再過一次 sanitizeErrorBody_。
+function summarizeBody_(text, contentType) {
+  const raw = String(text || '');
+  const looksHtml = /html/i.test(contentType || '') || /^\s*<(!doctype|html)/i.test(raw);
+  if (!looksHtml) return sanitizeErrorBody_(raw); // JSON / 純文字沿用既有脫敏，行為不變
+  const matched = raw.match(/<title[^>]*>([\s\S]{0,120}?)<\/title>/i);
+  const title = sanitizeErrorBody_(String((matched && matched[1]) || '').replace(/\s+/g, ' ').trim());
+  return title ? 'HTML 頁面，標題：' + title : 'HTML 頁面（無標題，未夾帶原始內容）';
+}
+
 function describeFailure_(response, text, leg, fallbackUrl) {
+  const contentType = headerOf_(response, 'content-type');
   return {
     leg,
     status: response ? response.status : 0,
-    contentType: headerOf_(response, 'content-type'),
+    contentType,
     finalUrl: (response && response.url) || fallbackUrl || '',
-    body: sanitizeErrorBody_(text)
+    body: summarizeBody_(text, contentType)
   };
 }
 

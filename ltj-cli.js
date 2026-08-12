@@ -212,8 +212,8 @@ function sanitizeErrorBody_(text) {
 // 重試的安全界線 —— 指令碼在第一段就跑完了：
 //   第二段失敗時資料早已寫入，重發整個 POST 會讓寫入動作執行第二次。
 //   伺服器端並未對 idempotencyKey 去重（只原樣回傳），擋不住重複。故：
-//     第二段失敗 → 只重取第二段（純 GET 暫存結果，重取幾次都不會再次執行指令碼），讀寫皆安全
-//     第一段失敗 → 只有唯讀動作重發；寫入動作直接拋錯，把證據交給呼叫端判斷
+//     第二段失敗 → 只重取第二段（純 GET 暫存結果，重取幾次都不會再次執行指令碼）
+//     第一段     → 誰都只送一次，唯讀動作也不重發（量測依據見 postLiteJiraApi 內註解）
 const RETRY_DELAYS_MS = [500, 1500];
 // 逾時總預算：失敗案例本身就要 10~38 秒，沒有上限的話重試會把單次呼叫拖成數分鐘
 const DEFAULT_BUDGET_MS = 45000;
@@ -236,11 +236,24 @@ function isMethodPreservingRedirect_(status) {
 // Location 允許是相對路徑（RFC 7231 §7.1.2）。不解析就直接餵 fetch 會拋出
 // 「Failed to parse URL from /macros/echo?user_content_key=…」——把等同臨時憑證的
 // 查詢字串原樣寫進例外訊息，繞過所有遮蔽。故一律先對基準網址解析。
+// 解析不了（對方回畸形 Location）就回 null：不能退回原字串再去 fetch，
+// 那等於把同一個洞留在退路上。
 function resolveUrl_(location, base) {
   try {
     return new URL(String(location), String(base)).toString();
   } catch (err) {
-    return String(location);
+    return null;
+  }
+}
+
+// 307/308 會用原方法重送，而請求內容含存取權杖 —— 對方若把 Location 指向第三方主機，
+// 權杖就送出去了。舊版靠 fetch 預設續跳時同樣有這個問題，但既然已接手導向處理，
+// 就在這裡收斂成同源才續跳。
+function isSameOrigin_(a, b) {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch (err) {
+    return false;
   }
 }
 
@@ -260,7 +273,8 @@ function headerOf_(response, name) {
 // 憑證會出現在四個位置，只砍查詢字串不夠：
 //   查詢字串 user_content_key=…、片段 #access_token=…、帳密 https://user:pw@host/、
 //   路徑段 /JSESSIONID=…/。故用 URL 重組，只留通訊協定 + 主機 + 路徑，
-//   路徑再過一次 sanitizeErrorBody_ 遮掉夾在路徑段裡的 token 形狀。
+//   路徑再過一次 sanitizeErrorBody_（只認得 ltj_pat_ / Bearer / Authorization /
+//   Set-Cookie 四種形狀，夾在路徑段裡的其他 token 形式攔不到 —— 已知限制）。
 function redactUrl_(url) {
   if (!url) return '(未取得)';
   const text = String(url);
@@ -305,8 +319,13 @@ function summarizeBody_(text) {
   const raw = String(text || '');
   // 判準是「能不能解析成 JSON」，不是 content-type 或內容開頭 ——
   // 那兩個都由回應方決定，對方只要不宣告 html、內容不以 <!doctype 起頭，
-  // 就能讓夾帶憑證的頁面走進「倒 200 字原文」那條路。能解析成 JSON 的才是我們的
-  // API 回應，沿用 LJ-116 既有脫敏（行為不變）；其餘一律只取標題。
+  // 就能讓夾帶憑證的頁面走進「倒 200 字原文」那條路。
+  //
+  // JSON 分支沿用 LJ-116 既有脫敏（那是既有契約，見主庫
+  // tests/lj-116-mcp-schema-strict.test.js 的 strips_cookies 一條）。
+  // 已知限制：能解析成 JSON 但夾帶憑證的回應仍會倒 200 字（經脫敏）。
+  // 我方 API 一律回 200 + 信封並在上層提前 return，走到這裡的 JSON 必然不是我方回應；
+  // Apps Script 也不會回非 2xx 的 JSON，故實務上碰不到。改動前同樣如此，非本次退步。
   if (parseJson_(raw) !== null) return sanitizeErrorBody_(raw);
 
   // 標題只從 <head> 內第一個 <title> 取。屬性值可能含 `>`（如 <title data-x="a>b">），
@@ -346,10 +365,14 @@ function describeThrown_(err, leg, fallbackUrl) {
 // GH-303：錯誤訊息帶齊判讀所需的 —— 哪一段壞的、最後連到哪、對方回什麼格式、頁面標題
 function transportError_(failure, requestId, attempts, isWrite) {
   const info = failure || { leg: '未知', status: 0, contentType: '', finalUrl: '', body: '' };
-  // 第二段失敗代表指令碼已在第一段執行完畢 —— 寫入很可能已生效。
+  // 兩種情況下寫入可能已生效：
+  //   第二段失敗 —— 指令碼確定已在第一段執行完畢
+  //   status 0（連線層拋例外）—— 連線在送出後中斷時，伺服器可能已收完內容並寫入。
+  //     實測：伺服器寫完再切斷連線，client 只看得到「第一段失敗」，但資料已經進去了。
+  //     分不出「還沒送到」與「送到了但回不來」，故一律當可能已生效。
   // 不講明的話，上層（LLM 或 worker 的自動重試）會把「傳輸失敗」讀成「沒生效」而重打，
   // 而伺服器端不去重，那就是第二筆寫入。
-  const writeMayHaveApplied = Boolean(isWrite) && info.leg === '二';
+  const writeMayHaveApplied = Boolean(isWrite) && (info.leg === '二' || info.status === 0);
   const error = new Error(
     'LiteJira API 傳輸失敗：HTTP ' + info.status + '（第' + info.leg + '段，共嘗試 ' + attempts + ' 次）' +
     '\n  requestId: ' + requestId +
@@ -364,6 +387,12 @@ function transportError_(failure, requestId, attempts, isWrite) {
   // 讓上層改判斷 / 記錄時不必解析錯誤字串（finalUrl 已是遮蔽版）
   info.writeMayHaveApplied = writeMayHaveApplied;
   error.litejiraTransport = info;
+  // 「第一段只送一次」只是這個函數的不變式，擋不住呼叫端整個再呼叫一次。
+  // scripts/litejira-worker.js 的 classifyWorkerError_ 把沒有 code 的錯誤判為
+  // 可重試，會把同一則留言重送 3 次 —— 正是本工單要防的重複寫入，只是搬到呼叫端。
+  // 該函數已支援 err.transient === false（走終止路徑不重試），故在這裡掛旗標，
+  // 不必改 worker。這是唯一能把「寫入可能已生效」變成實際行為的接點。
+  if (writeMayHaveApplied) error.transient = false;
   return error;
 }
 
@@ -406,7 +435,7 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
   const requestId = opts.requestId || ('ltj-' + Date.now());
   const ctx = {
     attempts: 0,
-    deadline: Date.now() + (opts.budgetMs || DEFAULT_BUDGET_MS),
+    deadline: Date.now() + (opts.budgetMs === undefined ? DEFAULT_BUDGET_MS : opts.budgetMs),
     leg2TimeoutMs: opts.leg2TimeoutMs === undefined ? LEG2_TIMEOUT_MS : opts.leg2TimeoutMs,
     sleep: opts.sleep || function (ms) { return new Promise(function (done) { setTimeout(done, ms); }); }
   };
@@ -437,10 +466,14 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
     rawLocation = headerOf_(response, 'location');
     // 307/308 語意是「這次沒處理，改對新網址用原方法重送」→ 重送不會造成重複寫入。
     // 舊版預設自動續跳、能正常運作，改成手動接手後必須自己補上，否則等於砍掉這條路。
+    // 只續跳一次、且限同源：連續 308 不會變成迴圈，權杖也不會被導去第三方主機。
     if (isMethodPreservingRedirect_(response.status) && rawLocation) {
-      ctx.attempts++;
-      response = await fetchFn(resolveUrl_(rawLocation, url), init);
-      rawLocation = headerOf_(response, 'location');
+      const next = resolveUrl_(rawLocation, url);
+      if (next && isSameOrigin_(next, url)) {
+        ctx.attempts++;
+        response = await fetchFn(next, init);
+        rawLocation = headerOf_(response, 'location');
+      }
     }
   } catch (err) {
     throw transportError_(describeThrown_(err, '一', url), requestId, ctx.attempts, isWrite);
@@ -459,7 +492,14 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
     throw transportError_(describeFailure_(response, text, '一', url), requestId, ctx.attempts, isWrite);
   }
 
-  const stashed = await fetchStashedResult_(fetchFn, resolveUrl_(rawLocation, url), ctx);
+  const stashUrl = resolveUrl_(rawLocation, url);
+  if (!stashUrl) {
+    throw transportError_(
+      { leg: '一', status: response.status, contentType: headerOf_(response, 'content-type'),
+        finalUrl: redactUrl_(url), body: '導向目標無法解析為合法網址' },
+      requestId, ctx.attempts, isWrite);
+  }
+  const stashed = await fetchStashedResult_(fetchFn, stashUrl, ctx);
   if (stashed.payload !== undefined) return stashed.payload;
   throw transportError_(stashed.failure, requestId, ctx.attempts, isWrite);
 }

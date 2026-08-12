@@ -252,21 +252,97 @@ test('GH-303：相對 Location 要對基準網址解析，不得原樣餵給 fet
   assert.equal(seen[1], 'https://script.google.com/macros/echo?user_content_key=TEMPCRED_zzz', '相對路徑要解析成絕對網址');
 });
 
-test('GH-303：307/308 要用原方法對新網址續送（舊版靠自動續跳，改手動後必須自己補）', async () => {
+test('GH-303：同源的 307/308 要用原方法續送（舊版靠自動續跳，改手動後必須自己補）', async () => {
   for (const status of [307, 308]) {
     const seen = [];
     const fetchImpl = async (url, options) => {
       const method = (options && options.method) || 'GET';
       seen.push(method + ' ' + url);
-      if (seen.length === 1) return reply(status, '', { location: 'https://new.example/exec' });
+      if (seen.length === 1) return reply(status, '', { location: '/v2/exec' });
       if (method === 'POST') return reply(302, '', REDIRECT);
       return reply(200, JSON_OK, { 'content-type': 'application/json' });
     };
 
-    const envelope = await postLiteJiraApi(fetchImpl, 'https://old.example/exec', 't', 'searchTickets', {}, READ);
+    const envelope = await postLiteJiraApi(fetchImpl, 'https://api.example/exec', 't', 'searchTickets', {}, READ);
     assert.deepEqual(envelope, { ok: true, data: { count: 1 } }, status + ' 應能完成');
-    assert.equal(seen[1], 'POST https://new.example/exec', status + ' 必須維持 POST');
+    assert.equal(seen[1], 'POST https://api.example/v2/exec', status + ' 必須維持 POST 且解析相對路徑');
   }
+});
+
+test('GH-303：跨主機的 307/308 不得續送 —— 請求內容含存取權杖', async () => {
+  for (const status of [307, 308]) {
+    const seen = [];
+    const fetchImpl = async (url, options) => {
+      seen.push(String(url));
+      return reply(status, '', { location: 'https://evil.example/collect' });
+    };
+
+    await assert.rejects(
+      () => postLiteJiraApi(fetchImpl, 'https://api.example/exec', 'ltj_pat_SECRET_zzz', 'searchTickets', {}, READ),
+      (err) => {
+        assert.doesNotMatch(err.message, /ltj_pat_SECRET_zzz/, '權杖不得出現在訊息');
+        return true;
+      }
+    );
+    assert.equal(seen.length, 1, status + '：不得把帶權杖的請求送去第三方主機');
+    assert.ok(!seen.some((u) => u.includes('evil.example')), status + '：完全沒碰過第三方主機');
+  }
+});
+
+test('GH-303：連續 307 不會無限續跳', async () => {
+  let n = 0;
+  const fetchImpl = async () => { n++; return reply(307, '', { location: '/again' }); };
+  await assert.rejects(() => postLiteJiraApi(fetchImpl, 'https://api.example/exec', 't', 'searchTickets', {}, READ));
+  assert.equal(n, 2, '只續跳一次：第二個 307 就收手');
+});
+
+test('GH-303：畸形的 Location 不得被拿去 fetch', async () => {
+  // 解析失敗時若退回原字串再 fetch，undici 會把整串（含查詢字串）寫進例外訊息
+  const seen = [];
+  const fetchImpl = async (url, options) => {
+    seen.push(String(url));
+    return reply(302, '', { location: 'https://[?user_content_key=SECRET_zzz' });
+  };
+
+  await assert.rejects(
+    () => postLiteJiraApi(fetchImpl, 'https://api.example/exec', 't', 'searchTickets', {}, READ),
+    (err) => {
+      assert.doesNotMatch(err.message, /SECRET_zzz/, '畸形網址的查詢字串不得外洩');
+      assert.match(err.message, /無法解析為合法網址/);
+      return true;
+    }
+  );
+  assert.equal(seen.length, 1, '只打過第一段，沒拿畸形網址去 fetch');
+});
+
+test('GH-303：寫入可能已生效時掛 transient=false，擋住呼叫端的自動重試', async () => {
+  // scripts/litejira-worker.js 的 classifyWorkerError_ 把沒有 code 的錯誤判為可重試，
+  // 會把同一則留言重送 3 次。這個旗標是唯一能擋住它的接點。
+  const cases = [
+    { name: '第二段失敗', impl: async (url, o) => ((o && o.method) === 'POST' ? reply(302, '', REDIRECT) : reply(404, DRIVE_404, { 'content-type': 'text/html' })) },
+    { name: '連線中斷', impl: async () => { throw new Error('socket hang up'); } }
+  ];
+
+  for (const c of cases) {
+    await assert.rejects(
+      () => postLiteJiraApi(c.impl, 'https://exec', 't', 'addComment', {}, WRITE),
+      (err) => {
+        assert.equal(err.transient, false, c.name + '：必須標成不可重試');
+        assert.equal(err.litejiraTransport.writeMayHaveApplied, true);
+        return true;
+      }
+    );
+  }
+
+  // 唯讀動作不該被標成不可重試 —— 呼叫端重讀沒有副作用
+  const readImpl = async (url, o) => ((o && o.method) === 'POST' ? reply(302, '', REDIRECT) : reply(404, DRIVE_404, { 'content-type': 'text/html' }));
+  await assert.rejects(
+    () => postLiteJiraApi(readImpl, 'https://exec', 't', 'searchTickets', {}, READ),
+    (err) => {
+      assert.notEqual(err.transient, false, '唯讀失敗仍可重試');
+      return true;
+    }
+  );
 });
 
 // ── 逾時 ──────────────────────────────────────────────────

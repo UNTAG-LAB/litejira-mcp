@@ -222,10 +222,26 @@ const DEFAULT_BUDGET_MS = 45000;
 // 中止第一段則不會讓已執行的寫入復原，故第一段不設。
 const LEG2_TIMEOUT_MS = 8000;
 
-// 只認 301/302/303 —— 這三種依規範本來就把 POST 轉成 GET，改用 GET 續跳不改變語意。
-// 307/308 要求保留原方法，不可當成第二段處理，故留給下面的「沒有導向」分支拋錯（帶完整證據）。
+// 301/302/303 依規範把 POST 轉成 GET，改用 GET 續跳不改變語意 → 當成第二段處理。
 function isRedirect_(status) {
   return status === 301 || status === 302 || status === 303;
+}
+
+// 307/308 要求保留原方法。收到它代表對方「沒有處理這次請求，請改對新網址重送」，
+// 所以重送不會造成重複寫入 —— 讀寫都可安全續跳，但必須維持 POST。
+function isMethodPreservingRedirect_(status) {
+  return status === 307 || status === 308;
+}
+
+// Location 允許是相對路徑（RFC 7231 §7.1.2）。不解析就直接餵 fetch 會拋出
+// 「Failed to parse URL from /macros/echo?user_content_key=…」——把等同臨時憑證的
+// 查詢字串原樣寫進例外訊息，繞過所有遮蔽。故一律先對基準網址解析。
+function resolveUrl_(location, base) {
+  try {
+    return new URL(String(location), String(base)).toString();
+  } catch (err) {
+    return String(location);
+  }
 }
 
 // 值得重試的狀態。200 也列入：實測第一段會回 200 卻夾帶 Google 錯誤頁，
@@ -240,12 +256,25 @@ function headerOf_(response, name) {
   return response.headers.get(name) || '';
 }
 
-// 診斷要看得出「最後連到哪個主機」，但查詢字串含 user_content_key（等同臨時憑證）故遮蔽
+// 診斷要看得出「最後連到哪個主機與路徑」，其餘一律砍掉。
+// 憑證會出現在四個位置，只砍查詢字串不夠：
+//   查詢字串 user_content_key=…、片段 #access_token=…、帳密 https://user:pw@host/、
+//   路徑段 /JSESSIONID=…/。故用 URL 重組，只留通訊協定 + 主機 + 路徑，
+//   路徑再過一次 sanitizeErrorBody_ 遮掉夾在路徑段裡的 token 形狀。
 function redactUrl_(url) {
   if (!url) return '(未取得)';
   const text = String(url);
-  const mark = text.indexOf('?');
-  return mark === -1 ? text : text.slice(0, mark) + '?…(參數已遮蔽)';
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch (err) {
+    // 解析不了就只留問號前那段，且一樣過脫敏
+    const mark = text.indexOf('?');
+    return sanitizeErrorBody_(mark === -1 ? text : text.slice(0, mark)) + '（未能解析）';
+  }
+  const path = sanitizeErrorBody_(parsed.pathname || '/');
+  const tail = (parsed.search || parsed.hash || parsed.username) ? '（查詢字串／片段／帳密已遮蔽）' : '';
+  return parsed.protocol + '//' + parsed.host + path + tail;
 }
 
 function parseJson_(text) {
@@ -272,37 +301,68 @@ function timeoutSignal_(ms) {
 // 但完全不給內容就診斷不了 GH-303。折衷是只取 <title>：實測它已足以分辨兩種失敗
 // （「找不到網頁」= Google 側取結果故障、「LiteJira — 無權限」= 導向鏈繞回 doGet），
 // 而 <title> 不是憑證會出現的位置。取出來仍再過一次 sanitizeErrorBody_。
-function summarizeBody_(text, contentType) {
+function summarizeBody_(text) {
   const raw = String(text || '');
-  const looksHtml = /html/i.test(contentType || '') || /^\s*<(!doctype|html)/i.test(raw);
-  if (!looksHtml) return sanitizeErrorBody_(raw); // JSON / 純文字沿用既有脫敏，行為不變
-  const matched = raw.match(/<title[^>]*>([\s\S]{0,120}?)<\/title>/i);
-  const title = sanitizeErrorBody_(String((matched && matched[1]) || '').replace(/\s+/g, ' ').trim());
-  return title ? 'HTML 頁面，標題：' + title : 'HTML 頁面（無標題，未夾帶原始內容）';
+  // 判準是「能不能解析成 JSON」，不是 content-type 或內容開頭 ——
+  // 那兩個都由回應方決定，對方只要不宣告 html、內容不以 <!doctype 起頭，
+  // 就能讓夾帶憑證的頁面走進「倒 200 字原文」那條路。能解析成 JSON 的才是我們的
+  // API 回應，沿用 LJ-116 既有脫敏（行為不變）；其餘一律只取標題。
+  if (parseJson_(raw) !== null) return sanitizeErrorBody_(raw);
+
+  // 標題只從 <head> 內第一個 <title> 取。屬性值可能含 `>`（如 <title data-x="a>b">），
+  // 故屬性段用 (?:"[^"]*"|'[^']*'|[^>])* 正確跳過引號內的 `>`。
+  const matched = raw.match(/<title(?:"[^"]*"|'[^']*'|[^>])*>([\s\S]{0,120}?)<\/title\s*>/i);
+  let title = String((matched && matched[1]) || '').replace(/\s+/g, ' ').trim();
+  // 標題可能回顯被擋的網址（攔截式 proxy 常這樣寫），裡面就會夾帶 user_content_key
+  title = title.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, '（網址已遮蔽）');
+  title = sanitizeErrorBody_(title);
+  return title ? '頁面標題：' + title : '非 JSON 回應（無標題，未夾帶原始內容）';
 }
 
 function describeFailure_(response, text, leg, fallbackUrl) {
-  const contentType = headerOf_(response, 'content-type');
   return {
     leg,
     status: response ? response.status : 0,
-    contentType,
-    finalUrl: (response && response.url) || fallbackUrl || '',
-    body: summarizeBody_(text, contentType)
+    contentType: headerOf_(response, 'content-type'),
+    // 一律存遮蔽後的網址：這個物件的註解邀請上層記錄它，存原始字串等於請人把
+    // user_content_key 寫進紀錄檔
+    finalUrl: redactUrl_((response && response.url) || fallbackUrl || ''),
+    body: summarizeBody_(text)
   };
 }
 
-// GH-303：錯誤訊息帶齊判讀所需的四樣 —— 哪一段壞的、最後連到哪、對方回什麼格式、內容前 200 字
-function transportError_(failure, requestId, attempts) {
+// 連線層例外（逾時中止、DNS 失敗、對方中途斷線）的訊息不是我們寫的，可能含請求內容
+// 或網址，故一律過脫敏 + 截短，不可原樣放行。
+function describeThrown_(err, leg, fallbackUrl) {
+  return {
+    leg,
+    status: 0,
+    contentType: '',
+    finalUrl: redactUrl_(fallbackUrl || ''),
+    body: sanitizeErrorBody_(String((err && err.message) || err))
+  };
+}
+
+// GH-303：錯誤訊息帶齊判讀所需的 —— 哪一段壞的、最後連到哪、對方回什麼格式、頁面標題
+function transportError_(failure, requestId, attempts, isWrite) {
   const info = failure || { leg: '未知', status: 0, contentType: '', finalUrl: '', body: '' };
+  // 第二段失敗代表指令碼已在第一段執行完畢 —— 寫入很可能已生效。
+  // 不講明的話，上層（LLM 或 worker 的自動重試）會把「傳輸失敗」讀成「沒生效」而重打，
+  // 而伺服器端不去重，那就是第二筆寫入。
+  const writeMayHaveApplied = Boolean(isWrite) && info.leg === '二';
   const error = new Error(
     'LiteJira API 傳輸失敗：HTTP ' + info.status + '（第' + info.leg + '段，共嘗試 ' + attempts + ' 次）' +
     '\n  requestId: ' + requestId +
-    '\n  最終網址: ' + redactUrl_(info.finalUrl) +
+    '\n  最終網址: ' + info.finalUrl +
     '\n  content-type: ' + (info.contentType || '(無)') +
-    '\n  回應內容: ' + (info.body || '(空)')
+    '\n  回應內容: ' + (info.body || '(空)') +
+    (writeMayHaveApplied
+      ? '\n  ⚠️ 這是寫入動作，且失敗在取回結果的階段 —— 指令碼已執行，寫入很可能已生效。' +
+        '\n     重送會寫第二遍（伺服器端不對 idempotencyKey 去重）。請先查工單現況再決定。'
+      : '')
   );
-  // 讓上層改判斷 / 記錄時不必解析錯誤字串
+  // 讓上層改判斷 / 記錄時不必解析錯誤字串（finalUrl 已是遮蔽版）
+  info.writeMayHaveApplied = writeMayHaveApplied;
   error.litejiraTransport = info;
   return error;
 }
@@ -317,17 +377,20 @@ async function fetchStashedResult_(fetchFn, location, ctx) {
     }
     ctx.attempts++;
     let response;
+    let text;
     try {
       response = await fetchFn(location, { redirect: 'follow', signal: timeoutSignal_(ctx.leg2TimeoutMs) });
+      // text() 必須包在同一個 try 內：逾時可能落在「標頭已到、內容還沒讀完」，
+      // 那時中止例外從 text() 拋出。放在外面會讓它整個逃逸 —— 不重取、也沒有任何診斷。
+      text = await response.text();
     } catch (err) {
       // 逾時中止也走這裡：純讀取被中止沒有副作用，下一輪重取即可
-      failure = { leg: '二', status: 0, contentType: '', finalUrl: location, body: String((err && err.message) || err) };
+      failure = describeThrown_(err, '二', location);
       continue;
     }
-    const text = await response.text();
     if (response.status >= 200 && response.status < 300) {
       const payload = parseJson_(text);
-      if (payload) return { payload };
+      if (payload !== null) return { payload };
     }
     failure = describeFailure_(response, text, '二', location);
     if (!isTransient_(failure.status)) break;
@@ -337,7 +400,9 @@ async function fetchStashedResult_(fetchFn, location, ctx) {
 
 async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
   const opts = options || {};
-  const isWrite = Boolean(opts.write);
+  // write 只影響錯誤訊息要不要警告「寫入可能已生效」，不影響重試次數 ——
+  // 第一段對誰都只送一次（見下方 measured 註解）。預設當寫入：漏傳旗標時寧可多警告。
+  const isWrite = opts.write !== false;
   const requestId = opts.requestId || ('ltj-' + Date.now());
   const ctx = {
     attempts: 0,
@@ -352,44 +417,51 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
     body: JSON.stringify({ token, action, params, requestId })
   };
 
-  // 寫入動作的第一段只打一次：重發會讓已生效的寫入再執行一遍
-  const maxFirstLeg = isWrite ? 1 : RETRY_DELAYS_MS.length + 1;
-  let failure = null;
-
-  for (let attempt = 0; attempt < maxFirstLeg; attempt++) {
-    if (attempt > 0) {
-      if (Date.now() > ctx.deadline) break;
-      await ctx.sleep(RETRY_DELAYS_MS[attempt - 1]);
+  // 第一段對誰都只送一次 —— 唯讀動作也不重發。
+  //
+  // 量測依據（2026-08-12 正式環境交錯對照，新舊實作相鄰執行、順序交替，各 20 輪）：
+  //   舊實作                失敗 35%  中位數 10603ms  最慢 44346ms
+  //   重發第一段 + 重取第二段  失敗 25%  中位數 30347ms  最慢 72976ms
+  //   只重取第二段           失敗 25%  中位數 13057ms  最慢 40770ms
+  // 重發第一段對失敗率零貢獻（兩種設定都是 25%），只換來 17 秒中位數延遲 ——
+  // 因為第一段本身要 3~45 秒，而第二段正常只要 0.25~2.5 秒。
+  //
+  // 附帶好處是安全性不再依賴呼叫端記得傳旗標：第一段只送一次是這個函數的不變式，
+  // 漏傳 options 的呼叫端（scripts/litejira-worker.js、scripts/litejira-api-smoke.js）
+  // 也不可能重複寫入。
+  ctx.attempts++;
+  let response = null;
+  let rawLocation = '';
+  try {
+    response = await fetchFn(url, init);
+    rawLocation = headerOf_(response, 'location');
+    // 307/308 語意是「這次沒處理，改對新網址用原方法重送」→ 重送不會造成重複寫入。
+    // 舊版預設自動續跳、能正常運作，改成手動接手後必須自己補上，否則等於砍掉這條路。
+    if (isMethodPreservingRedirect_(response.status) && rawLocation) {
+      ctx.attempts++;
+      response = await fetchFn(resolveUrl_(rawLocation, url), init);
+      rawLocation = headerOf_(response, 'location');
     }
-    ctx.attempts++;
-
-    let response;
-    try {
-      response = await fetchFn(url, init);
-    } catch (err) {
-      failure = { leg: '一', status: 0, contentType: '', finalUrl: url, body: String((err && err.message) || err) };
-      continue;
-    }
-
-    const location = headerOf_(response, 'location');
-    if (!isRedirect_(response.status) || !location) {
-      // 沒有導向 → 結果或錯誤就在這一段（測試替身、以及第一段直接回 HTML 錯誤頁的情境）
-      const text = await response.text();
-      const payload = parseJson_(text);
-      if (payload && response.status >= 200 && response.status < 300) return payload;
-      failure = describeFailure_(response, text, '一', url);
-      if (!isTransient_(failure.status)) break;
-      continue;
-    }
-
-    const stashed = await fetchStashedResult_(fetchFn, location, ctx);
-    if (stashed.payload) return stashed.payload;
-    failure = stashed.failure;
-    if (isWrite) break; // 寫入已生效，不可再發第一段
-    if (Date.now() > ctx.deadline) break;
+  } catch (err) {
+    throw transportError_(describeThrown_(err, '一', url), requestId, ctx.attempts, isWrite);
   }
 
-  throw transportError_(failure, requestId, ctx.attempts);
+  if (!isRedirect_(response.status) || !rawLocation) {
+    // 沒有導向 → 結果或錯誤就在這一段（測試替身、以及第一段直接回 HTML 錯誤頁的情境）
+    let text;
+    try {
+      text = await response.text();
+    } catch (err) {
+      throw transportError_(describeThrown_(err, '一', url), requestId, ctx.attempts, isWrite);
+    }
+    const payload = parseJson_(text);
+    if (payload !== null && response.status >= 200 && response.status < 300) return payload;
+    throw transportError_(describeFailure_(response, text, '一', url), requestId, ctx.attempts, isWrite);
+  }
+
+  const stashed = await fetchStashedResult_(fetchFn, resolveUrl_(rawLocation, url), ctx);
+  if (stashed.payload !== undefined) return stashed.payload;
+  throw transportError_(stashed.failure, requestId, ctx.attempts, isWrite);
 }
 
 function parseOptions_(args) {

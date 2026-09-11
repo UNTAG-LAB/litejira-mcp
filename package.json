@@ -13,6 +13,7 @@
   "files": [
     "litejira-mcp-launch.cjs",
     "litejira-mcp-server.js",
+    "litejira-v1-transport.js",
     "ltj-cli.js",
     "README.md",
     "LICENSE"

@@ -32,21 +32,11 @@ MCP 的 18 個 tools / 6 個 resources / 4 個 prompts schema 一律不動（下
   （server 端真去重的驗證留待下一包的真 DB 驗證）。
 - **未知 action 本機拒絕**：不推測、不編造路由，且拒絕發生在送出之前（測試斷言 fetch 呼叫次數為 0）。
 
-## 已知缺口：映射表只填得了 searchTickets
+## 第一包交付範圍
 
-唯讀調查回覆在 `searchTickets → GET /api/v1/tickets` 的 query 清單處**被截斷**，其餘 action 的
-method / path / query / body 沒有取得。依「不猜新 endpoint」的紀律：
+第一包提交 48922e1 已包含 searchTickets、getTicket、listComments、getActivityLog、linkTickets、addComment、attachLink 七條 action 映射；CLI 的 search/show/comments/activity/link/comment（reply 別名）/attach 已接新 API。初稿缺映射的問題已在交付前修正，不能沿用初稿的不可用敘述。
 
-- `ACTION_MAP` 目前只有 `searchTickets`，且 query 白名單只收契約全域規則明確點名的參數
-  （`project`、`assigneeId`、`ownerId`、`creatorId`、`parentId`、`limit`、`cursor`）。
-  `q` / `type` / `status` / `version` / `module` / `subtype` / `sort` / `order` 在 v1 的參數名未經確認，
-  傳入會被本機擋下並說明原因，而不是照舊名送出去。
-- `PENDING_CONTRACT_ACTIONS` 列出 23 個尚待補契約的 action；呼叫時報 `unmapped_action`，訊息明講「缺契約列」。
-- 因此 CLI 的 `comments` / `activity` / `link` / `reply` / `attach` 在契約補齊前會以 exit 2 本機失敗。
-  這是刻意的：寧可明著缺，也不要打到猜出來的路徑。
-
-**待補**：上述 action 的 v1 端點契約列（method / path / query / body），補進 `ACTION_MAP` 即可啟用，
-傳輸層其餘行為不需改動。
+其餘 MCP 工具與資源依後續工作包補齊；本包不代表全部 MCP 升級完成。讀取面後續進度見 pack2-mcp-read.md。
 
 ## 驗證
 

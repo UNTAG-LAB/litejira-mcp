@@ -60,6 +60,7 @@ class LiteJiraTransportError extends Error {
 const SORT_VALUES = Object.freeze(['updatedAt', 'createdAt', 'key']);
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 const ACTIVITY_KIND_VALUES = Object.freeze(['user', 'system']);
+const STATS_SCOPE_VALUES = Object.freeze(['all', 'me']);
 
 // 讀取類清單共用的分頁參數（limit / cursor / order）。
 const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
@@ -76,6 +77,9 @@ const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
 //   query.multi   可重複出現的多值參數（陣列 → 重複 query，不用逗號串接）
 //   query.enums   固定值域
 //   query.int     必須是正整數
+//   query.bool    必須是布林（序列化為 true / false）
+//   query.required 契約上必填的 query（缺了本機就擋，不送出半套查詢）
+//   query.exclusive 互斥組：同一組內最多只能出現一個
 //   body.allow / body.required / body.nullable / body.uuid / body.uuidArray / body.url
 //   rejected      已知「不可直接沿用舊 MCP 參數名」的映射，附指路訊息
 //   contractRef   契約出處
@@ -147,6 +151,78 @@ const ACTION_MAP = Object.freeze({
     contractRef: 'GET /api/v1/tickets/{ticket}/activity'
   }),
 
+  // 可用流轉動作。無任何 query；回應 data 是物件（含 actions 等欄位），不是陣列。
+  getAllowedTransitions: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/tickets/{ticketId}/transitions',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    contractRef: 'GET /api/v1/tickets/{ticketId}/transitions'
+  }),
+
+  // ── 工作區 / 專案層級的參考資料（resources 用）──
+  getMeta: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/meta',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({
+      allow: Object.freeze(['project']),
+      required: Object.freeze(['project'])
+    }),
+    contractRef: 'GET /api/v1/meta?project=KEY'
+  }),
+
+  getWorkflow: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/workflow',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({
+      allow: Object.freeze(['project', 'type', 'flowGroupCode']),
+      required: Object.freeze(['project'])
+    }),
+    contractRef: 'GET /api/v1/workflow?project=KEY&type=TYPE&flowGroupCode=CODE'
+  }),
+
+  // 成員是「工作區名冊」，契約上不收 project：硬塞會打出不存在的查詢條件。
+  getMembers: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/members',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({
+      allow: Object.freeze(['activeOnly', 'jobRole']),
+      bool: Object.freeze(['activeOnly'])
+    }),
+    rejected: Object.freeze({
+      project: '成員清單是工作區層級名冊，v1 不收 project；請移除該條件'
+    }),
+    contractRef: 'GET /api/v1/members?activeOnly=true&jobRole=ROLE'
+  }),
+
+  getVersions: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/versions',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({
+      allow: Object.freeze(['project']),
+      required: Object.freeze(['project'])
+    }),
+    contractRef: 'GET /api/v1/versions?project=KEY'
+  }),
+
+  // scope / targetVersion / role 三者互斥（scope 省略時 server 端預設 all）。
+  getDashboardStats: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/stats',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({
+      allow: Object.freeze(['project', 'scope', 'targetVersion', 'role']),
+      required: Object.freeze(['project']),
+      enums: Object.freeze({ scope: STATS_SCOPE_VALUES }),
+      exclusive: Object.freeze([Object.freeze(['scope', 'targetVersion', 'role'])])
+    }),
+    contractRef: 'GET /api/v1/stats?project=KEY&scope=all|me'
+  }),
+
   linkTickets: Object.freeze({
     method: 'PUT',
     // childId 走路徑，可帶 UUID / 舊 key / 純數字 key；parentId 走 body，只收 UUID 或 null（解除）。
@@ -206,13 +282,13 @@ const REPLACED_ACTIONS = Object.freeze({
   replyFeedback: 'v1 沒有 replyFeedback；留言請用 addComment（POST /tickets/{ticketId}/comments），狀態流轉是另一條獨立流程'
 });
 
-// 本包尚未納入的舊 action（其餘 18 tools 的 schema 下一包處理）。
+// 尚未納入的舊 action（第三包處理）。第二包補齊了全部讀取路由，
+// 剩下的清一色是寫入端點，契約未取得前一律本機拒絕，不會退回舊後端。
 // 列在這裡是為了讓錯誤訊息能明講「缺哪一列契約」，而不是回一句籠統的 unknown。
 const PENDING_CONTRACT_ACTIONS = Object.freeze([
   'removeAttachment', 'updateField', 'createTicket', 'reassignTicket',
-  'convertTicketType', 'toggleWatchTicket', 'transitionTicket', 'getAllowedTransitions',
-  'batchTransition', 'batchReassign', 'batchSetField',
-  'getMeta', 'getMembers', 'getVersions', 'getDashboardStats', 'getWorkflow'
+  'convertTicketType', 'toggleWatchTicket', 'transitionTicket',
+  'batchTransition', 'batchReassign', 'batchSetField'
 ]);
 
 function isWriteMethod(method) {
@@ -298,8 +374,10 @@ function buildQuery(route, params) {
   const uuidKeys = spec.uuid || [];
   const multiKeys = spec.multi || [];
   const intKeys = spec.int || [];
+  const boolKeys = spec.bool || [];
   const enums = spec.enums || {};
   const search = new URLSearchParams();
+  const present = [];
 
   Object.keys(params || {}).forEach((key) => {
     const value = params[key];
@@ -327,6 +405,9 @@ function buildQuery(route, params) {
       if (intKeys.indexOf(key) !== -1 && !isPositiveInt_(one)) {
         throw invalidArg_('參數「' + key + '」必須是正整數', { param: key });
       }
+      if (boolKeys.indexOf(key) !== -1 && typeof one !== 'boolean') {
+        throw invalidArg_('參數「' + key + '」必須是布林值（true / false）', { param: key });
+      }
       if (enums[key] && enums[key].indexOf(String(one)) === -1) {
         throw invalidArg_('參數「' + key + '」只接受 ' + enums[key].join(' | '),
           { param: key, allowed: enums[key].slice() });
@@ -334,7 +415,25 @@ function buildQuery(route, params) {
       // 多值一律用重複 query（?status=a&status=b），不做逗號串接。
       search.append(key, serializeQueryValue(one));
     });
+    present.push(key);
   });
+
+  // 必填 query 缺席 → 本機擋下。不自動代入任何猜來的值（例如「第一個專案」）。
+  (spec.required || []).forEach((key) => {
+    if (present.indexOf(key) === -1) {
+      throw invalidArg_('缺少必填查詢參數：' + key + '（' + route.contractRef + '）', { param: key });
+    }
+  });
+
+  // 互斥組：同組內給超過一個等於語意衝突，靜默取一個會回錯資料。
+  (spec.exclusive || []).forEach((group) => {
+    const given = group.filter((key) => present.indexOf(key) !== -1);
+    if (given.length > 1) {
+      throw invalidArg_('參數 ' + group.join(' / ') + ' 互斥，一次只能帶一個（收到：' + given.join('、') + '）',
+        { params: given, exclusive: group.slice() });
+    }
+  });
+
   return search;
 }
 
@@ -671,14 +770,18 @@ async function callV1(options) {
 
 module.exports = {
   ACTION_MAP,
+  ACTIVITY_KIND_VALUES,
   API_BASE_PATH,
   API_ERROR_STATUS,
   DEFAULT_TIMEOUT_MS,
   IDEMPOTENCY_KEY_PATTERN,
   LiteJiraApiError,
   LiteJiraTransportError,
+  ORDER_VALUES,
   PENDING_CONTRACT_ACTIONS,
   REPLACED_ACTIONS,
+  SORT_VALUES,
+  STATS_SCOPE_VALUES,
   UUID_PATTERN,
   buildRequest,
   callV1,

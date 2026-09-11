@@ -76,7 +76,9 @@ const credFile = resolveCredFile();
 if (credFile) {
   const text = fs.readFileSync(credFile, 'utf8');
   for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^(LTJ_API_URL|LTJ_API_TOKEN|LTJ_API_PAT|LTJ_MCP_ENABLE_WRITES)=(.+)$/);
+    // GH-257：白名單新增 LTJ_PROJECT（非祕密，只是專案層級資源的預設專案 key）。
+    // 白名單之外的行一律忽略，避免 credentials 檔意外注入任意環境變數。
+    const m = line.match(/^(LTJ_API_URL|LTJ_API_TOKEN|LTJ_API_PAT|LTJ_MCP_ENABLE_WRITES|LTJ_PROJECT)=(.+)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
   }
 }

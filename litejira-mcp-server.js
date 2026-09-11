@@ -1,24 +1,39 @@
 #!/usr/bin/env node
 
 const readline = require('readline');
-const { postLiteJiraApi } = require('./ltj-cli');
+
+// GH-257 第二包：讀取路徑（4 個 read tools + 6 個 resources）改走對外 API v1。
+// 舊的 postLiteJiraApi（單一 POST + body token）在本檔案已完全不再使用：
+// 尚未取得 v1 契約的 14 個寫入工具一律本機拒絕，不會退回舊後端。
+const {
+  callV1,
+  ACTIVITY_KIND_VALUES,
+  LiteJiraApiError,
+  LiteJiraTransportError,
+  ORDER_VALUES,
+  SORT_VALUES
+} = require('./litejira-v1-transport');
 
 // LJ-160 #2：版本號單一事實源 = package.json，避免手寫在多處漂移。
 const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
 
-// LJ-134: 工單 ID regex（PREFIX-NNN）。試算表工單前綴僅限 FB/BUG/REQ/EPIC/IDEA/TASK/STD。
-// 命名空間紀律（根 CLAUDE.md）：LJ/DEV 是 LiteJira「自身開發」編號，事實源在 BACKLOG.md，
-// 不是試算表工單 → 故意排除。防止把 BACKLOG 編號當試算表工單下 addComment/updateField/linkTickets
-// 等操作而污染命名空間（webapp/Code.js 的 VALID_TYPES 本就無 LJ/DEV，此 pattern 對齊）。
+// GH-257：v1 的工單參照可以是 UUID、字母 key（BUG-481）或純數字 key，三者都直接進路徑。
+// 舊版只認固定前綴的 PREFIX-NNN，會把 v1 主鍵 UUID 擋在門外，故放寬。
+// 前綴不再寫死白名單：v1 的 key 命名空間由 server 決定，客戶端硬編前綴只會在新增類型時誤擋。
+// 這裡只擋「三種形狀都不是」的自由字串，不讓它送出去碰運氣；不存在的 key 由後端回 not_found。
+const TICKET_REF_PATTERN =
+  '^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z]+-\\d+|\\d+)$';
+// 寫入工具（本包未升級）仍沿用舊的 PREFIX-NNN 形狀說明，但它們在 callTool 就被擋下。
 const TICKET_ID_PATTERN = '^(FB|BUG|REQ|EPIC|IDEA|TASK|STD)-\\d+$';
 
 // LJ-116 批次 2: enum 常數（基於 webapp/Code.js:38-40 + UPDATE_FIELD_WHITELIST 2289-2299 事實依據）
 const ENUM_TYPES = ['EPIC', 'REQ', 'BUG', 'IDEA', 'TASK', 'STD'];
 const ENUM_CONVERTIBLE_TYPES = ['EPIC', 'REQ', 'BUG', 'IDEA', 'TASK']; // STD 不可轉
 const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中文後綴
-const ENUM_ORDER = ['asc', 'desc'];
-const ENUM_SORT = ['createdAt', 'updatedAt', 'priority', 'dueDate'];
-const ENUM_SEARCH_RESPONSE_MODE = ['count', 'compact', 'full'];
+// GH-257：order / sort 值域改以傳輸層契約表為單一事實源，避免兩處漂移。
+// v1 的 sort 只有 updatedAt / createdAt / key —— 舊的 priority / dueDate 不在契約內。
+const ENUM_ORDER = ORDER_VALUES.slice();
+const ENUM_SORT = SORT_VALUES.slice();
 // LJ-184：發布方式 enum（對齊 webapp/Code.js UPDATE_FIELD_WHITELIST + transitionTicket 送測守衛）
 const ENUM_RELEASE_METHOD = ['待定', '熱更', '換包', '停服'];
 // LJ-184：createTicket / updateField 共用的 releaseMethod 參數 schema（集中維護，避免兩處漂移）
@@ -40,7 +55,29 @@ const ENUM_UPDATE_FIELDS = [
 
 // LJ-116: 常用參數 schema（給多個工具引用，集中維護）
 const P_TICKET_ID = { type: 'string', description: 'Ticket ID with prefix (FB/BUG/REQ/EPIC/IDEA/TASK/STD)-NNN，例如 BUG-481 / REQ-205。注意：LJ/DEV 是 LiteJira 自身開發編號（住 BACKLOG.md），非試算表工單，不接受。', pattern: TICKET_ID_PATTERN };
-const P_LIMIT = { type: 'integer', description: 'Max results (1-100). 超過上限請改用 cursor 分頁。', minimum: 1, maximum: 100 };
+// GH-257：v1 讀取端點的工單參照 — UUID（主鍵）/ 公開 key（BUG-481）/ 純數字 key 三選一。
+const P_TICKET_REF = {
+  type: 'string',
+  description: '工單參照：UUID 主鍵、公開 key（如 BUG-481）或純數字 key 皆可。',
+  pattern: TICKET_REF_PATTERN
+};
+// GH-257：成員 / 父工單身分一律 UUID。v1 不收顯示名，伺服器端也不做姓名推測。
+// JSON Schema 的 pattern 不帶旗標，所以大小寫要寫進字元集（傳輸層的 UUID_PATTERN 是靠 /i）。
+// 真正的守門人仍是傳輸層；這裡只是讓格式錯誤在送出前就有清楚的訊息。
+const UUID_SCHEMA_PATTERN =
+  '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+const P_MEMBER_UUID = (label) => ({
+  type: 'string',
+  description: label + '（UUID）。顯示名無法查詢，請先讀 litejira://members 取 id。',
+  pattern: UUID_SCHEMA_PATTERN
+});
+// GH-257：多值查詢條件 —— 單值傳字串，多值傳字串陣列（送出時展開成重複 query，不做逗號串接）。
+const P_MULTI = (description) => ({
+  type: ['string', 'array'],
+  description: description + '（單值傳字串，多值傳字串陣列）',
+  items: { type: 'string' }
+});
+const P_LIMIT = { type: 'integer', description: 'Max results (1-100，客戶端上限). 超過上限請改用 cursor 分頁。', minimum: 1, maximum: 100 };
 const P_CURSOR = { type: 'string', description: '分頁 cursor（從前一次回應的 nextCursor 帶入）' };
 const P_ORDER = { type: 'string', description: 'Sort order：asc 或 desc', enum: ENUM_ORDER };
 const P_IDEMPOTENCY = {
@@ -66,36 +103,46 @@ const ENUM_BATCH_FIELDS = ['priority', 'version', 'module', 'parentId'];
 const TOOL_DEFS = [
   // 既有保留（7 個）
   tool('litejira.searchTickets',
-    'Search and filter tickets. Defaults to compact 12-field items; use responseMode=count for totals, responseMode=full only when list-level full fields are required, or litejira://ticket/{id} for one complete ticket.',
+    'Search and filter tickets via API v1 (GET /tickets). Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. Multi-value filters (type/status/statusGroup/priority/module/subtype/targetVersion/foundVersion) accept a string or an array of strings. Use litejira://ticket/{id} for one complete ticket.',
     'searchTickets', false, {
+      project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；兩者皆無則不帶此條件（跨專案搜尋）。' },
       q: { type: 'string', description: 'Keyword search across title + description' },
-      type: { type: 'string', description: 'Filter by ticket type', enum: ENUM_TYPES },
-      status: { type: 'string', description: 'Filter by status. 動態值依工單 type 而定，請先讀 litejira://workflow/{type}。' },
-      assignee: { type: 'string', description: 'Filter by assignee 處理人顯示名稱（不是 email）' },
-      owner: { type: 'string', description: 'GH-242 Filter by owner 負責人（最終負責人）顯示名稱（不是 email）' },
-      creator: { type: 'string', description: 'Filter by creator 顯示名稱' },
-      version: { type: 'string', description: 'Filter by 目標版本（version name）' },
-      module: { type: 'string', description: 'Filter by module 模塊。動態值，請先讀 litejira://meta。' },
-      subtype: { type: 'string', description: 'Filter by subtype 子類型。動態值依 type 而定，請先讀 litejira://meta。' },
-      responseMode: {
-        type: 'string',
-        description: 'Response size: count=只回總數，compact=12 個核心欄位（MCP 預設），full=既有完整清單欄位',
-        enum: ENUM_SEARCH_RESPONSE_MODE,
-        default: 'compact'
-      },
+      type: P_MULTI('Filter by ticket type 工單類型。動態值，請先讀 litejira://meta'),
+      status: P_MULTI('Filter by status 狀態。動態值依工單 type 而定，請先讀 litejira://workflow/{type}'),
+      statusGroup: P_MULTI('Filter by status group 狀態分組。動態值，請先讀 litejira://meta'),
+      priority: P_MULTI('Filter by priority 優先級。動態值，請先讀 litejira://meta'),
+      module: P_MULTI('Filter by module 模塊。動態值，請先讀 litejira://meta'),
+      subtype: P_MULTI('Filter by subtype 子類型。動態值依 type 而定，請先讀 litejira://meta'),
+      targetVersion: P_MULTI('Filter by 目標版本。動態值，請先讀 litejira://versions'),
+      foundVersion: P_MULTI('Filter by 發現版本。動態值，請先讀 litejira://versions'),
+      assigneeId: P_MEMBER_UUID('處理人'),
+      ownerId: P_MEMBER_UUID('負責人（最終負責人）'),
+      creatorId: P_MEMBER_UUID('建立者'),
+      parentId: { type: 'string', description: '父工單 UUID（不是公開 key）', pattern: UUID_SCHEMA_PATTERN },
       limit: P_LIMIT,
       cursor: P_CURSOR,
-      sort: { type: 'string', description: 'Sort field', enum: ENUM_SORT },
+      sort: { type: 'string', description: 'Sort field（v1 契約值域）', enum: ENUM_SORT },
       order: P_ORDER
     }, [], {
       readOnlyHint: true,
       openWorldHint: true,
       title: '搜尋工單'
+    }, {
+      v1: { action: 'searchTickets', defaultProject: true },
+      // 舊參數在 v1 沒有等價語意：靜默丟掉會讓呼叫端以為有濾到，故明確拒絕並指路。
+      removedParams: {
+        assignee: '改用 assigneeId（UUID）；v1 不收顯示名，請先讀 litejira://members 取 id',
+        owner: '改用 ownerId（UUID）；請先讀 litejira://members 取 id',
+        creator: '改用 creatorId（UUID）；請先讀 litejira://members 取 id',
+        version: '版本條件分成 targetVersion（目標版本）與 foundVersion（發現版本）兩個獨立參數，請明講是哪一個',
+        responseMode: 'v1 的 GET /tickets 沒有 responseMode；清單一律回契約定義的欄位集合。' +
+          '只要數量請自行讀回應長度，單張完整內容請讀 litejira://ticket/{id}'
+      }
     }),
   tool('litejira.listComments',
-    'List comments for a ticket (paginated). Returns comment content + author + timestamps.',
+    'List comments for a ticket via API v1 (GET /tickets/{ticket}/comments). Paginated with limit / cursor / order; returns { items, nextCursor } where each item carries a UUID id and an author { id, name }. The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key.',
     'listComments', false, {
-      ticketId: P_TICKET_ID,
+      ticketId: P_TICKET_REF,
       limit: P_LIMIT,
       cursor: P_CURSOR,
       order: P_ORDER
@@ -103,19 +150,32 @@ const TOOL_DEFS = [
       readOnlyHint: true,
       openWorldHint: true,
       title: '列出工單留言'
+    }, {
+      v1: { action: 'listComments', ticketParam: 'ticket' }
     }),
   tool('litejira.getActivityLog',
-    'Get full activity timeline (comments + system events like status changes, reassignments). Paginated.',
+    'Get the activity timeline for a ticket via API v1 (GET /tickets/{ticket}/activity). Paginated with limit / cursor / order. Filter with kind=user (human actions incl. comments) or kind=system (status changes, reassignments); OMIT kind to get everything. Returns { items, nextCursor }.',
     'getActivityLog', false, {
-      ticketId: P_TICKET_ID,
+      ticketId: P_TICKET_REF,
       limit: P_LIMIT,
       cursor: P_CURSOR,
-      includeComments: { type: 'boolean', description: '是否含留言事件（預設 true）' },
-      includeSystemEvents: { type: 'boolean', description: '是否含系統事件如狀態變更 / 轉派（預設 true）' }
+      order: P_ORDER,
+      kind: {
+        type: 'string',
+        description: '事件種類單選：user=使用者操作（含留言）、system=系統事件。不帶此參數 = 全部。',
+        enum: ACTIVITY_KIND_VALUES.slice()
+      }
     }, ['ticketId'], {
       readOnlyHint: true,
       openWorldHint: true,
       title: '取工單時間軸'
+    }, {
+      v1: { action: 'getActivityLog', ticketParam: 'ticket' },
+      removedParams: {
+        // 舊參數是兩個獨立布林，v1 是單選 kind，語意不是一對一（兩者皆真 = 不帶 kind）。
+        includeComments: 'v1 改用 kind=user|system 單選，不帶 kind 才是全部；請改帶 kind（留言屬 user）',
+        includeSystemEvents: 'v1 改用 kind=user|system 單選，不帶 kind 才是全部；請改帶 kind'
+      }
     }),
   tool('litejira.linkTickets',
     'Set or remove parent-child relationship between tickets (e.g. link BUG to EPIC). Pass parentId=null to unlink.',
@@ -271,13 +331,15 @@ const TOOL_DEFS = [
       title: '流轉工單狀態（動作按鈕，含自動轉派）'
     }),
   tool('litejira.getTransitions',
-    'Get the currently available action-button transitions for a ticket (by its current status). Returns { group, status, transitions, actions: [{ label, toStatus, direction }], isFinal }. ONLY actions[].label is a valid "action" arg for litejira.transitionTicket / litejira.batchTransition. GH-253: the "transitions" array is NOT an action list — it is the backend validation whitelist of target STATUS names (non-final states always include 廢單/退單 even when no such button exists for that type), and its values differ from action labels (e.g. BUG at 待開發 → transitions = 開發中/已取消/廢單/退單, actions = 開始開發/取消). Sending a transitions[] value as "action" will be rejected.',
+    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read actions[] for the labels that are valid transition actions. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels. NOTE: performing a transition (litejira.transitionTicket / litejira.batchTransition) is NOT available in this version — its v1 write contract is not wired yet.',
     'getAllowedTransitions', false, {
-      ticketId: P_TICKET_ID
+      ticketId: P_TICKET_REF
     }, ['ticketId'], {
       readOnlyHint: true,
       openWorldHint: true,
       title: '查工單當前可用流轉動作'
+    }, {
+      v1: { action: 'getAllowedTransitions', ticketParam: 'ticketId' }
     }),
   // LJ-178 新增（3 個）：批量操作對外化 — 一發處理 N 張，取代逐張迴圈
   tool('litejira.batchTransition',
@@ -319,50 +381,101 @@ const TOOL_DEFS = [
     })
 ];
 
-// ── LJ-095 v2：Resource 定義（6 個） ──
+// ── LJ-095 v2：Resource 定義（6 個）；GH-257 第二包改走 API v1 ──
+//
+// 專案來源（needsProject 的四個資源）：URI 的 ?project=KEY > 環境變數 LTJ_PROJECT。
+// 兩者皆無 → 明確報錯，**不**自動挑「第一個專案」（猜錯會安靜回錯專案的資料）。
+// query：URI 上允許帶的查詢參數白名單；未列的參數一律擋下，不靜默忽略。
 const RESOURCE_DEFS = [
   // GH-255：說明對齊實際回傳（流轉規則已移出 meta，改由 workflow 資源提供）
-  { uri: 'litejira://meta', name: 'LiteJira 元資料', description: '類型/優先級/狀態/子類型/模塊/STD類目清單（不含流轉規則，見 workflow 資源）', action: 'getMeta' },
-  { uri: 'litejira://members', name: '成員清單', description: '啟用成員（name/email/role）', action: 'getMembers' },
-  { uri: 'litejira://versions', name: '版本清單', description: '版本列表（name/status/dates）', action: 'getVersions' },
-  { uri: 'litejira://dashboard', name: 'Dashboard 統計', description: '各狀態計數、逾期數', action: 'getDashboardStats' },
+  {
+    uri: 'litejira://meta', name: 'LiteJira 元資料',
+    description: '指定專案的類型/優先級/狀態/子類型/模塊清單（不含流轉規則，見 workflow 資源）。' +
+      '可用 litejira://meta?project=KEY 指定專案，省略則用 LTJ_PROJECT。',
+    action: 'getMeta', needsProject: true, query: ['project']
+  },
+  {
+    uri: 'litejira://members', name: '成員清單',
+    description: '工作區成員名冊（含 UUID id —— 搜尋的 assigneeId/ownerId/creatorId 就用這個 id）。' +
+      '預設只回啟用成員；可用 litejira://members?activeOnly=false 取全部、?jobRole=ROLE 篩職能。' +
+      '注意：成員是工作區層級，不接受 project 參數。',
+    action: 'getMembers', needsProject: false, query: ['activeOnly', 'jobRole']
+  },
+  {
+    uri: 'litejira://versions', name: '版本清單',
+    description: '指定專案的版本列表。可用 litejira://versions?project=KEY 指定專案，省略則用 LTJ_PROJECT。',
+    action: 'getVersions', needsProject: true, query: ['project']
+  },
+  {
+    uri: 'litejira://dashboard', name: 'Dashboard 統計',
+    description: '指定專案的統計。scope=all（預設）或 me；scope / targetVersion / role 三者互斥，一次只能帶一個。' +
+      '例：litejira://dashboard?project=KEY&scope=me。',
+    action: 'getDashboardStats', needsProject: true, query: ['project', 'scope', 'targetVersion', 'role']
+  },
   // LJ-116 批次 4: paramMap decodeURIComponent（防 percent-encoded ticketId / type 字符）
-  { uriTemplate: 'litejira://workflow/{type}', name: '工作流規則', description: '指定類型的狀態流轉規則', action: 'getWorkflow', paramMap: (uri) => ({ type: decodeURIComponent(uri.split('/').pop()) }) },
-  { uriTemplate: 'litejira://ticket/{id}', name: '工單詳情', description: '單張工單完整資料（28 欄位）', action: 'getTicket', paramMap: (uri) => ({ ticketId: decodeURIComponent(uri.split('/').pop()) }) }
+  {
+    uriTemplate: 'litejira://workflow/{type}', name: '工作流規則',
+    description: '指定專案（+ 可選工單類型）的狀態流轉規則。type 可留空（litejira://workflow/）取全部；' +
+      '可另帶 ?project=KEY 與 ?flowGroupCode=CODE。',
+    action: 'getWorkflow', needsProject: true, query: ['project', 'type', 'flowGroupCode'],
+    paramMap: (path) => {
+      const type = decodeURIComponent(path.split('/').pop());
+      return type === '' ? {} : { type: type };
+    }
+  },
+  {
+    uriTemplate: 'litejira://ticket/{id}', name: '工單詳情',
+    description: '單張工單完整資料。{id} 可用 UUID 主鍵、公開 key（BUG-481）或純數字 key。',
+    action: 'getTicket', needsProject: false, query: [],
+    paramMap: (path) => ({ ticket: decodeURIComponent(path.split('/').pop()) })
+  }
 ];
 
-// ── LJ-095 v2：Prompt 定義（4 個） ──
+// ── LJ-095 v2：Prompt 定義（4 個）；GH-257 第二包對齊 v1 讀取流程 ──
+// 本版只有讀取工具可用（寫入端點的 v1 契約尚未接線），因此四個 prompt 一律以
+// 「彙整草稿 → 交還給使用者」收尾，不指示呼叫本版拿不到的寫入工具。
 const PROMPT_DEFS = [
   {
     name: 'report-bug',
-    description: '回報 BUG — 引導填寫標題/重現步驟/預期結果，自動判斷子類型+負責人+版本，建單',
+    description: '回報 BUG — 引導填寫標題/重現步驟/預期結果，讀 meta/members/versions 備妥受控值，產出建單草稿（本版不自動建單）',
     arguments: [
-      { name: 'title', description: 'BUG 標題（可選，會再確認）', required: false }
+      { name: 'title', description: 'BUG 標題（可選，會再確認）', required: false },
+      { name: 'project', description: '專案 key（可選；省略則用啟動設定的 LTJ_PROJECT）', required: false }
     ]
   },
   {
     name: 'weekly-status',
-    description: '本週進度報告 — 統計本週完成/進行中/新開/逾期工單，按版本分組',
-    arguments: []
+    description: '本週進度報告 — 讀 dashboard 統計 + searchTickets 近期更新，按版本分組彙整',
+    arguments: [
+      { name: 'project', description: '專案 key（可選；省略則用啟動設定的 LTJ_PROJECT）', required: false }
+    ]
   },
   {
     name: 'triage-ticket',
-    description: '分類工單 — 讀取完整工單+工作流規則+成員清單，建議優先級/負責人/狀態',
+    description: '分類工單 — 讀取完整工單+工作流規則+成員清單（UUID），建議優先級/負責人/狀態',
     arguments: [
-      { name: 'ticketId', description: '要 triage 的工單 ID', required: true }
+      { name: 'ticketId', description: '工單參照：UUID、公開 key（BUG-481）或純數字 key', required: true },
+      { name: 'project', description: '專案 key（可選；省略則用啟動設定的 LTJ_PROJECT）', required: false }
     ]
   },
   {
     name: 'close-ticket',
-    description: '關閉工單 — 檢查合法狀態轉換路徑，標記完成並附留言',
+    description: '關閉工單 — 讀工單 + 可用流轉動作，列出到結案的合法路徑（本版不執行流轉）',
     arguments: [
-      { name: 'ticketId', description: '要關閉的工單 ID', required: true }
+      { name: 'ticketId', description: '工單參照：UUID、公開 key（BUG-481）或純數字 key', required: true }
     ]
   }
 ];
 
+// GH-257 第二包：沒有 v1 契約列的工具一律標記 pending。
+// 用「反推」而不是逐一手寫，確保新增工具時不會漏標而悄悄掉回舊後端。
+TOOL_DEFS.forEach(function (def) {
+  if (!def.v1) def.pending = true;
+});
+
 // LJ-116: tool() factory v2 — 接 annotations、properties 接 short form ('string') 或 long form ({type, description, ...})
-function tool(name, description, action, write, properties, required, annotations) {
+// GH-257: extra 帶 v1 契約接線資訊（action / ticketParam / defaultProject）與 removedParams 指路表。
+function tool(name, description, action, write, properties, required, annotations, extra) {
   const def = {
     name,
     description,
@@ -379,11 +492,15 @@ function tool(name, description, action, write, properties, required, annotation
     }
   };
   if (annotations) def.annotations = annotations;
+  if (extra) Object.assign(def, extra);
   return def;
 }
 
+// GH-257：只公告已接上 v1 的工具。
+// 未升級的工具留在 TOOL_DEFS（這樣 tools/call 回的是明確的 TOOL_NOT_MIGRATED 而非籠統的 unknown tool），
+// 但不出現在 tools/list —— 廣告一個必定失敗的工具，只會浪費上下文並誘導助手走死路。
 function listTools() {
-  return TOOL_DEFS.map((def) => {
+  return TOOL_DEFS.filter((def) => !def.pending).map((def) => {
     const out = {
       name: def.name,
       description: def.description,
@@ -399,45 +516,42 @@ function getConfigFromEnv(env) {
   return {
     apiUrl: runtimeEnv.LTJ_API_URL || '',
     token: runtimeEnv.LTJ_API_TOKEN || runtimeEnv.LTJ_API_PAT || '',
+    // GH-257：專案層級端點（meta / versions / dashboard / workflow）的預設專案。
+    // 非祕密設定；沒設也不猜，缺的時候明確報錯。
+    project: runtimeEnv.LTJ_PROJECT || '',
     enableWrites: String(runtimeEnv.LTJ_MCP_ENABLE_WRITES || '').toLowerCase() === 'true'
   };
+}
+
+// GH-257：尚未接上 v1 契約的工具一律在本機擋下。
+// 關鍵是「不得悄悄退回舊後端」：舊路徑是單一 POST + body token，與 v1 是兩套權限模型，
+// 混用會讓呼叫端拿到語意不同的錯誤碼，也讓 PAT 走回舊通道。
+function assertMigrated_(def) {
+  if (!def.pending) return;
+  throw mcpError_('TOOL_NOT_MIGRATED',
+    '工具「' + def.name + '」尚未接上 API v1（其 v1 端點契約未取得），本機拒絕呼叫，' +
+    '不會退回舊後端。本版可用的是讀取工具：litejira.searchTickets / listComments / getActivityLog / getTransitions，' +
+    '以及 litejira:// 資源。寫入工具將在下一個版本接齊。',
+    { tool: def.name, action: def.action }, -32601);
 }
 
 async function callTool(name, args, config, fetchImpl) {
   const def = TOOL_DEFS.find((candidate) => candidate.name === name);
   if (!def) throw mcpError_('UNKNOWN_TOOL', 'unknown MCP tool: ' + name, undefined, -32602);
+  // 未升級的工具先擋：不論 LTJ_MCP_ENABLE_WRITES 設成什麼，回答都一樣且誠實。
+  assertMigrated_(def);
   const cfg = config || getConfigFromEnv();
   if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', 'LTJ_API_URL and LTJ_API_TOKEN are required (legacy LTJ_API_PAT also accepted)');
   if (def.write && !cfg.enableWrites) throw mcpError_('WRITES_DISABLED', 'write tools require LTJ_MCP_ENABLE_WRITES=true');
 
-  const params = validateToolInput(def, args || {});
-  // GH-265：只在 MCP 邊界預設 compact；後端 API 未帶參數時仍維持 full 相容契約。
-  if (def.action === 'searchTickets' && params.responseMode === undefined) {
-    params.responseMode = 'compact';
-  }
-  if (def.write && !params.idempotencyKey) {
-    throw mcpError_('IDEMPOTENCY_KEY_REQUIRED', 'write tools require idempotencyKey', undefined, -32602);
-  }
+  const params = toV1Params_(def, validateToolInput(def, args || {}), cfg);
 
-  const fetchFn = fetchImpl || globalThis.fetch;
-  if (!fetchFn) throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
-  const envelope = await postLiteJiraApi(fetchFn, cfg.apiUrl, cfg.token, def.action, params);
-  // LJ-116 批次 4 (H4): 業務錯誤改 isError + 帶 next-step hint
-  if (!envelope.ok) {
-    const apiError = envelope.error || {};
-    const apiCode = apiError.code || 'API_ERROR';
-    const apiMsg = apiError.message || 'LiteJira API error';
-    const hint = errorHintFor_(apiCode);
-    return {
-      isError: true,
-      content: [{
-        type: 'text',
-        text: '[' + apiCode + '] ' + apiMsg + (hint ? '\n\n💡 ' + hint : '')
-      }]
-    };
-  }
+  const outcome = await callV1Or_(def.v1.action, params, cfg, fetchImpl);
+  if (outcome.isError) return outcome;
+  // v1 的 { data } 信封已由傳輸層拆掉一層，這裡拿到的就是契約裡的 data，原樣送出：
+  // 新 shape（UUID id / 公開 key / member { id, name } / nextCursor）不做任何加工或改名。
+  const data = outcome.value;
   // LJ-116 批次 4 (H5): 雙寫 — text fallback 給老主機、structuredContent 給新主機
-  const data = envelope.data || {};
   return {
     // GH-255：緊湊輸出。縮排只服務人眼，AI 一樣能解析，實測膨脹 52%（35.1KB → 53.5KB）
     content: [{ type: 'text', text: JSON.stringify(data) }],
@@ -445,12 +559,80 @@ async function callTool(name, args, config, fetchImpl) {
   };
 }
 
+// MCP 參數 → v1 params。MCP 端刻意沿用契約參數名，這裡只處理三件事：
+//   1. ticketId → 該路由實際的路徑參數名（ticket / ticketId）
+//   2. project 預設值（僅 searchTickets；沒有 LTJ_PROJECT 就不帶，等於跨專案搜尋）
+//   3. 其餘原樣帶出 —— 不做任何改名或值域轉換，讓傳輸層的白名單是唯一守門人
+function toV1Params_(def, input, cfg) {
+  const wiring = def.v1;
+  const out = {};
+  Object.keys(input).forEach((key) => { out[key] = input[key]; });
+  if (wiring.ticketParam && out.ticketId !== undefined) {
+    out[wiring.ticketParam] = out.ticketId;
+    if (wiring.ticketParam !== 'ticketId') delete out.ticketId;
+  }
+  if (wiring.defaultProject && out.project === undefined && cfg.project) {
+    out.project = cfg.project;
+  }
+  return out;
+}
+
+// 共用的 v1 呼叫 + 錯誤轉譯。回 { value } 或 MCP 的 isError 結果。
+async function callV1Or_(action, params, cfg, fetchImpl) {
+  const fetchFn = fetchImpl || globalThis.fetch;
+  if (!fetchFn) throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
+  let result;
+  try {
+    result = await callV1({
+      fetch: fetchFn,
+      baseUrl: cfg.apiUrl,
+      token: cfg.token,
+      action: action,
+      params: params
+    });
+  } catch (err) {
+    if (err instanceof LiteJiraApiError) {
+      // 後端裁決：code / message / details 原樣轉出，不重新編碼、不映射回舊的四種代碼。
+      return apiErrorResult_(err);
+    }
+    if (err instanceof LiteJiraTransportError) {
+      // 本機拒絕 / 連線層失敗：code 與 API 錯誤碼刻意不同名，呼叫端一看就知道沒到後端。
+      throw mcpError_(err.code, err.message, err.details, -32000);
+    }
+    throw err;
+  }
+  return { value: result.data };
+}
+
+// 業務錯誤 → isError 結果。details 一併帶出（structuredContent 讓主機拿得到結構化原文）。
+function apiErrorResult_(err) {
+  const hint = errorHintFor_(err.code);
+  const payload = { code: err.code, message: err.message, status: err.status };
+  if (err.details !== undefined) payload.details = err.details;
+  return {
+    isError: true,
+    content: [{
+      type: 'text',
+      text: '[' + err.code + '] ' + err.message +
+        (err.details !== undefined ? '\ndetails: ' + JSON.stringify(err.details) : '') +
+        (hint ? '\n\n💡 ' + hint : '')
+    }],
+    structuredContent: { error: payload }
+  };
+}
+
 function validateToolInput(def, args) {
   const schema = def.inputSchema;
+  const removed = def.removedParams || {};
   const out = {};
   const errors = [];
   Object.keys(args || {}).forEach((key) => {
     if (!schema.properties[key]) {
+      // GH-257：已移除的舊參數要指路，不能只回一句 unknown，更不能默默吃掉。
+      if (Object.prototype.hasOwnProperty.call(removed, key)) {
+        errors.push('parameter removed in API v1: ' + key + ' — ' + removed[key]);
+        return;
+      }
       errors.push('unknown parameter: ' + key);
       return;
     }
@@ -487,14 +669,16 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           },
           serverInfo: { name: 'litejira-mcp', version: PKG_VERSION },
           // GH-265：啟動指令只保留操作安全規則，歷史背景留在規格文件，避免每個 session 重複載入。
+          // GH-257 第二包：改述 v1 讀取契約；寫入尚未接線，明講以免助手繞路自創寫法。
           instructions: [
-            'LiteJira MCP 操作規則：',
-            '- 所有寫入都要帶 16-64 字元 idempotencyKey；重試沿用同一 key。',
-            '- 受控值讀 litejira://meta，成員讀 litejira://members，版本讀 litejira://versions；STD 建單另需 stdLevel2、stdLevel3。',
-            '- 狀態流轉先呼叫 litejira.getTransitions，再以 actions[].label 呼叫 litejira.transitionTicket；不可用 updateField 裸改 status。送測須備發布方式、修復方式、驗證方式。',
-            '- 多張同類操作用 batchTransition、batchReassign、batchSetField；清單用 searchTickets + cursor，預設 compact，只問數量用 responseMode=count。limit 上限 100。',
-            '- 工單 ID 僅接受 FB/BUG/REQ/EPIC/IDEA/TASK/STD-NNN；LJ/DEV 不是試算表工單。',
-            '- priority 必須填完整值：P0-緊急、P1-高、P2-中、P3-低。'
+            'LiteJira MCP 操作規則（API v1）：',
+            '- 本版只提供讀取：searchTickets / listComments / getActivityLog / getTransitions 與 litejira:// 資源。寫入工具（建單/留言/改欄位/流轉/批量）尚未接上 v1，呼叫會被拒絕，請改交草稿給使用者。',
+            '- 工單參照可用 UUID 主鍵、公開 key（BUG-481）或純數字 key；回傳同時有 UUID id 與公開 key，對人講 key、要精確就用 id。',
+            '- 成員條件只收 UUID：assigneeId / ownerId / creatorId（顯示名無效）。先讀 litejira://members 取 id。',
+            '- 受控值讀 litejira://meta，版本讀 litejira://versions，狀態流轉讀 litejira://workflow/{type}；別沿用記憶中的舊值域。',
+            '- 專案層級資源（meta/versions/dashboard/workflow）取 LTJ_PROJECT，或在 URI 帶 ?project=KEY；沒有就會報錯，不要亂猜專案。',
+            '- 清單用 limit + cursor 分頁（把 nextCursor 當 cursor 帶回），limit 上限 100；type/status/priority 等條件可傳陣列一次帶多值。',
+            '- activity 用 kind=user|system 單選過濾，不帶 kind 才是全部。'
           ].join('\n')
         }
       };
@@ -591,8 +775,11 @@ function matchesSchema_(value, schema) {
   const types = Array.isArray(schema.type) ? schema.type : [schema.type];
   if (value === null) return types.indexOf('null') !== -1;
   // LJ-178: array 型別必須先攔（typeof [] === 'object'，否則會被下方 jsType 檢查誤殺）
-  if (types.indexOf('array') !== -1) {
-    if (!Array.isArray(value)) return false;
+  // GH-257: 只有「值真的是陣列」時才走這條。多值參數是 ['string','array'] 聯集型別，
+  // 舊寫法會在收到單一字串時直接 return false。非陣列的值往下走一般型別檢查即可
+  // （陣列在型別不允許時仍會被擋掉：typeof [] === 'object' 不在任何白名單裡）。
+  if (types.indexOf('array') !== -1 && Array.isArray(value)) {
+    if (value.length === 0) return false;
     if (typeof schema.minItems === 'number' && value.length < schema.minItems) return false;
     if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return false;
     if (schema.items) {
@@ -644,17 +831,32 @@ function mcpError_(code, message, details, jsonRpcCode) {
   return err;
 }
 
-// LJ-116 批次 4: 業務錯誤 hint 表（依 server 端 4 種錯誤代碼，見 webapp/Code.js:316-370）
+// GH-257：hint 表改對齊 API v1 的錯誤碼。
+// 舊的四碼（AUTH_FAILED / UNKNOWN_ACTION / ADMIN_REQUIRED / ACTION_FAILED）在 v1 路徑上不會出現，
+// 也刻意不做重映射 —— v1 把它們拆成語意更細的碼（例如 403 底下三種互斥情況），
+// 硬塞回四碼會把資訊壓扁。未知的碼就不給 hint，訊息以 server 原文為準。
 function errorHintFor_(code) {
   switch (code) {
-    case 'AUTH_FAILED':
-      return 'LiteJira PAT 失效或缺失。請檢查 ~/.litejira/credentials.{env}.txt 內 LTJ_API_TOKEN。如需新 PAT 請聯絡 admin。';
-    case 'UNKNOWN_ACTION':
-      return '未知的 LiteJira action（litejira-mcp 與 server 版本不符）。請更新 litejira-mcp 至最新版。';
-    case 'ADMIN_REQUIRED':
-      return '此操作需要 LiteJira admin 權限（createPat / listPats / revokePat）。請聯絡 admin。';
-    case 'ACTION_FAILED':
-      return 'LiteJira 業務驗證失敗。建議：(1) 用 litejira.searchTickets 找正確 ticketId；(2) 讀 litejira://meta 取合法 type/priority/subtype/module enum 值；(3) 讀 litejira://workflow/{type} 取合法 status 流轉。';
+    case 'unauthenticated':
+      return 'PAT 失效或缺失。請檢查 ~/.litejira/credentials.env 內的 LTJ_API_TOKEN；需要新 PAT 請聯絡 admin。';
+    case 'membership_required':
+      return '你不是這個專案 / 工作區的成員，所以看不到這筆資料。請聯絡 admin 加入。';
+    case 'permission_denied':
+      return '你是成員，但這個操作的權限不足。請聯絡 admin 調整角色。';
+    case 'admin_required':
+      return '此操作僅限 admin。請聯絡 admin 代為處理。';
+    case 'not_found':
+      return '找不到目標。確認工單參照（UUID / 公開 key / 數字 key）與 project 是否正確；可用 litejira.searchTickets 反查。';
+    case 'invalid_argument':
+      return '參數不合契約。受控值請讀 litejira://meta，成員 UUID 讀 litejira://members，版本讀 litejira://versions，狀態流轉讀 litejira://workflow/{type}。';
+    case 'rate_limited':
+      return '呼叫過於頻繁。請降低頻率後重試；清單請改用 limit + cursor 分頁而非大量單筆查詢。';
+    case 'version_conflict':
+      return '資料在你讀取後被別人改過。請重新讀取最新內容再決定下一步。';
+    case 'state_conflict':
+      return '目標狀態與工單當前狀態不相容。請先呼叫 litejira.getTransitions 取當前實際可用的動作。';
+    case 'internal':
+      return '後端內部錯誤，與你的參數無關。稍後重試；持續發生請回報 admin 並附上時間點。';
     default:
       return '';
   }
@@ -669,49 +871,121 @@ function jsonRpcError_(id, code, message, data) {
 }
 
 // ── Resource 讀取 ──
+// GH-257：resource URI 現在可帶 query（?project=KEY 等）。先把 query 切開再比對定義，
+// 否則 litejira://meta?project=X 會被當成未知資源。
+function splitResourceUri_(uri) {
+  var raw = String(uri || '');
+  var q = raw.indexOf('?');
+  if (q === -1) return { path: raw, search: new URLSearchParams() };
+  return { path: raw.slice(0, q), search: new URLSearchParams(raw.slice(q + 1)) };
+}
+
+// 布林 query：只收字面 true / false。收到 "1" / "yes" 之類就報錯，不猜使用者的意思。
+function parseBoolQuery_(key, value) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw mcpError_('INVALID_RESOURCE_URI',
+    'resource query「' + key + '」只接受 true 或 false（收到：' + value + '）', { param: key }, -32602);
+}
+
+function resourceParams_(def, parts, cfg) {
+  var allow = def.query || [];
+  var params = def.paramMap ? def.paramMap(parts.path) : {};
+  parts.search.forEach(function (value, key) {
+    if (allow.indexOf(key) === -1) {
+      throw mcpError_('INVALID_RESOURCE_URI',
+        'resource query「' + key + '」不適用於 ' + (def.uri || def.uriTemplate) +
+        '（可用：' + (allow.length ? allow.join(', ') : '無') + '）',
+        { param: key, allowed: allow.slice() }, -32602);
+    }
+    if (Object.prototype.hasOwnProperty.call(params, key)) {
+      throw mcpError_('INVALID_RESOURCE_URI',
+        'resource 參數「' + key + '」重複指定；路徑與 query 不可互相覆蓋',
+        { param: key }, -32602);
+    }
+    params[key] = key === 'activeOnly' ? parseBoolQuery_(key, value) : value;
+  });
+
+  if (def.needsProject && params.project === undefined) {
+    // URI 沒指定就用啟動設定的 LTJ_PROJECT；兩者都沒有 → 明確報錯。
+    // 絕不自動挑「第一個專案」：猜錯會安靜回別的專案的資料，比報錯危險得多。
+    if (!cfg.project) {
+      throw mcpError_('PROJECT_REQUIRED',
+        '資源 ' + (def.uri || def.uriTemplate) + ' 需要指定專案。' +
+        '請在 URI 帶 ?project=<KEY>，或在啟動環境設定 LTJ_PROJECT=<KEY>。' +
+        '（不會自動選用任一專案。）',
+        { resource: def.uri || def.uriTemplate }, -32602);
+    }
+    params.project = cfg.project;
+  }
+  return params;
+}
+
 async function readResource_(uri, config, fetchImpl) {
+  var parts = splitResourceUri_(uri);
   // 比對固定 URI
-  var def = RESOURCE_DEFS.find(function(r) { return r.uri === uri; });
+  var def = RESOURCE_DEFS.find(function(r) { return r.uri === parts.path; });
   // 比對 URI template
   if (!def) {
     def = RESOURCE_DEFS.find(function(r) {
       if (!r.uriTemplate) return false;
-      var pattern = r.uriTemplate.replace(/\{[^}]+\}/g, '[^/]+');
-      return new RegExp('^' + pattern + '$').test(uri);
+      var pattern = r.uriTemplate.replace(/\{[^}]+\}/g, '[^/]*');
+      return new RegExp('^' + pattern + '$').test(parts.path);
     });
   }
   if (!def) throw mcpError_('UNKNOWN_RESOURCE', 'unknown resource URI: ' + uri, undefined, -32602);
   var cfg = config || getConfigFromEnv();
   if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', 'LTJ_API_URL and LTJ_API_TOKEN are required');
-  var fetchFn = fetchImpl || globalThis.fetch;
-  var params = def.paramMap ? def.paramMap(uri) : {};
-  var envelope = await postLiteJiraApi(fetchFn, cfg.apiUrl, cfg.token, def.action, params);
-  if (!envelope.ok) {
-    var apiError = envelope.error || {};
-    throw mcpError_(apiError.code || 'API_ERROR', apiError.message || 'LiteJira API error');
+
+  var params = resourceParams_(def, parts, cfg);
+  var outcome = await callV1Or_(def.action, params, cfg, fetchImpl);
+  if (outcome.isError) {
+    // resources/read 沒有 isError 通道，業務錯誤一律走 JSON-RPC error，code 維持後端原文。
+    var apiErr = outcome.structuredContent.error;
+    throw mcpError_(apiErr.code, apiErr.message, apiErr.details, -32000);
   }
   return {
     contents: [{
       uri: uri,
       mimeType: 'application/json',
-      // GH-255：緊湊輸出（同 sendToolResult_，見該處註解）
-      text: JSON.stringify(envelope.data || {})
+      // GH-255：緊湊輸出（同 callTool，見該處註解）
+      // v1 的 data 原樣輸出，不補預設值（|| {} 會把「合法的空陣列/空值」偽裝成物件）。
+      text: JSON.stringify(outcome.value)
     }]
   };
 }
 
 // ── Prompt 訊息生成 ──
+// GH-257：統一結尾語 —— 本版寫入工具尚未接上 v1 契約，呼叫會被本機拒絕。
+// prompt 直接講明，免得助手一路走到最後才撞牆、或自行編造替代寫法。
+const WRITE_PENDING_NOTE =
+  '注意：本版 litejira MCP 只開放讀取工具（searchTickets / listComments / getActivityLog / getTransitions 與 litejira:// 資源）。' +
+  '建單、留言、改欄位、流轉狀態等寫入工具尚未接上 API v1，呼叫會被直接拒絕 —— ' +
+  '請把結果整理成草稿交給我，不要嘗試用其他方式代為寫入。';
+
+// 專案子句：prompt 參數有給就明講，沒給就交代改用啟動設定。
+function projectClause_(project) {
+  return project
+    ? '本次專案 key = ' + project + '，讀資源時帶 ?project=' + encodeURIComponent(project) + '。'
+    : '專案未指定，資源直接讀（伺服器會套用啟動設定的 LTJ_PROJECT）；若回報缺 project 再問我要專案 key。';
+}
+
 function getPromptMessages_(name, args) {
+  const project = args.project;
+  const ticket = args.ticketId;
   switch (name) {
     case 'report-bug':
       return [{
         role: 'user',
         content: {
           type: 'text',
-          text: '幫我建一張 BUG 工單。' + (args.title ? '標題：' + args.title + '。' : '') +
-            '請先讀 litejira://meta 和 litejira://members 和 litejira://versions 取得子類型/成員/版本清單，' +
-            '然後問我：標題、重現步驟、預期結果、優先級（預設 P2-中）。' +
-            '自動判斷子類型和負責人，用最新 active 版本，最後呼叫 createTicket 建單。'
+          text: '幫我準備一張 BUG 工單的內容。' + (args.title ? '標題：' + args.title + '。' : '') +
+            projectClause_(project) +
+            '請先讀 litejira://meta（類型/優先級/子類型/模塊受控值）、litejira://members（成員名冊，含 UUID id）、' +
+            'litejira://versions（版本清單），一律採用讀回來的實際值，不要沿用記憶中的舊值域。' +
+            '然後問我：標題、重現步驟、預期結果、優先級、發現版本。' +
+            '最後輸出一份建單草稿（欄位: 值），成員欄位請同時列出顯示名與 UUID id。' +
+            WRITE_PENDING_NOTE
         }
       }];
     case 'weekly-status':
@@ -719,9 +993,14 @@ function getPromptMessages_(name, args) {
         role: 'user',
         content: {
           type: 'text',
-          text: '給我本週進度報告。' +
-            '先讀 litejira://dashboard 取統計數據，再用 searchTickets 查本週更新的工單（sort=updatedAt, order=desc）。' +
-            '彙整：本週完成 N 張、進行中 N 張、新開 N 張、逾期 N 張，按版本分組列出重點。'
+          text: '給我本週進度報告。' + projectClause_(project) +
+            '先讀 litejira://dashboard 取統計數據（需要只看我自己的部分時改讀 litejira://dashboard?scope=me；' +
+            'scope / targetVersion / role 三者互斥，一次只能帶一個）。' +
+            '再用 litejira.searchTickets 查近期更新的工單（sort=updatedAt, order=desc），' +
+            '結果超過一頁就把回應的 nextCursor 當 cursor 帶回去續查。' +
+            '狀態與版本條件可傳陣列一次帶多個值。' +
+            '彙整：本週完成 / 進行中 / 新開 各 N 張，按目標版本分組列出重點。' +
+            '工單請用公開 key（如 BUG-481）稱呼，需要精確參照時附上 UUID id。'
         }
       }];
     case 'triage-ticket':
@@ -729,10 +1008,13 @@ function getPromptMessages_(name, args) {
         role: 'user',
         content: {
           type: 'text',
-          text: '幫我分類工單 ' + (args.ticketId || '（請提供工單 ID）') + '。' +
-            '先讀 litejira://ticket/' + (args.ticketId || '{id}') + ' 取完整資料，' +
-            '讀 litejira://workflow/{type} 取合法狀態轉換，讀 litejira://members 取成員清單。' +
-            '建議：優先級、負責人、狀態。列出建議但不自動執行，等我確認。'
+          text: '幫我分類工單 ' + (ticket || '（請提供工單參照）') + '。' + projectClause_(project) +
+            '先讀 litejira://ticket/' + (ticket || '{id}') + ' 取完整資料（參照可用 UUID、公開 key 或數字 key），' +
+            '再讀 litejira://workflow/{type}（type 用該工單實際的類型）取合法狀態流轉，' +
+            '讀 litejira://members 取成員名冊 —— 建議負責人時請一併給出該成員的 UUID id，' +
+            '因為搜尋的 assigneeId / ownerId / creatorId 只收 UUID，不收顯示名。' +
+            '產出建議：優先級、負責人（名稱 + UUID）、下一個狀態。' +
+            WRITE_PENDING_NOTE
         }
       }];
     case 'close-ticket':
@@ -740,9 +1022,12 @@ function getPromptMessages_(name, args) {
         role: 'user',
         content: {
           type: 'text',
-          text: '幫我關閉工單 ' + (args.ticketId || '（請提供工單 ID）') + '。' +
-            '先讀 litejira://ticket/' + (args.ticketId || '{id}') + ' 和 litejira://workflow/{type}，' +
-            '確認合法轉換路徑。若可直接到「已完成」就執行，否則列出中間步驟讓我確認。附帶留言「由 AI 協助關閉」。'
+          text: '幫我確認工單 ' + (ticket || '（請提供工單參照）') + ' 要怎麼收尾。' +
+            '先讀 litejira://ticket/' + (ticket || '{id}') + ' 取現況，' +
+            '再呼叫 litejira.getTransitions（ticketId=' + (ticket || '{id}') + '）取當前實際可用的動作，' +
+            '以回應中的 actions[].label 為準；同一份回應裡的 transitions 是目標狀態白名單，不是動作名稱，別混用。' +
+            '若一步到不了結案狀態，請列出完整的中間步驟順序讓我確認。' +
+            WRITE_PENDING_NOTE
         }
       }];
     default:

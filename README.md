@@ -92,20 +92,43 @@ LTJ_MCP_ENABLE_WRITES=true
 
 ---
 
+## 設定預設專案（選用）
+
+本版有幾個資源是「專案層級」的（元資料、版本、統計、工作流）。在 credentials 檔加一行就不用每次指定：
+
+```
+LTJ_PROJECT=<你的專案 key>
+```
+
+沒設也沒關係——臨時指定即可，例如讀 `litejira://meta?project=OTHER`。
+兩邊都沒有時會直接報錯說「請指定專案」，**不會**自動挑一個專案給你（猜錯會安靜回錯專案的資料）。
+`LTJ_PROJECT` 不是祕密，只是一個專案代號。
+
+---
+
 ## 能做什麼
 
-| 你說 | AI 會做 |
-|------|--------|
-| 「建一張 P1 BUG 給思源」 | 建立新工單 |
-| 「搜尋 login 相關的工單」 | 搜尋篩選 |
-| 「查 BUG-530 完整內容」 | 讀工單詳情 |
-| 「在 BUG-530 留言說已修好」 | 發留言 |
-| 「把 BUG-530 轉派給 Howard」 | 轉派（帶通知） |
-| 「把 BUG-530 狀態改成自測中」 | 改狀態（依工作流自動轉派） |
+> ⚠️ **目前版本只開放「讀」**。本版是遷移到 LiteJira 對外 API v1 的中途站：讀取已經切換完成，
+> 寫入（建單、留言、改欄位、轉派、狀態流轉、批量操作）尚未接上新 API，**呼叫會被直接拒絕**，
+> AI 會改成把草稿整理給你。寫入會在下一版接齊，屆時無需改設定，更新套件重啟即可。
+
+| 你說 | AI 會做 | 本版 |
+|------|--------|------|
+| 「搜尋 login 相關的工單」 | 搜尋篩選 | ✅ |
+| 「查 BUG-530 完整內容」 | 讀工單詳情 | ✅ |
+| 「BUG-530 的留言和歷程給我看」 | 讀留言 / 時間軸 | ✅ |
+| 「BUG-530 現在能做哪些動作」 | 查可用流轉動作 | ✅ |
+| 「這季的進度統計」 | 讀 dashboard / 版本 / 成員 | ✅ |
+| 「建一張 P1 BUG 給思源」 | 建立新工單 | ⏳ 下一版 |
+| 「在 BUG-530 留言說已修好」 | 發留言 | ⏳ 下一版 |
+| 「把 BUG-530 轉派給 Howard」 | 轉派（帶通知） | ⏳ 下一版 |
+| 「把 BUG-530 狀態改成自測中」 | 改狀態（依工作流自動轉派） | ⏳ 下一版 |
 
 AI 會自動載入成員清單、版本列表、工作流規則。
 
-搜尋預設使用 `compact` 模式，每張只回 12 個清單判讀需要的核心欄位，降低大型結果對 AI 上下文的占用。只需要數量時可指定 `responseMode=count`；只有確實需要清單完整欄位時才用 `responseMode=full`，單張完整內容優先讀 `litejira://ticket/{id}`。
+工單可以用 UUID、公開編號（`BUG-481`）或純數字編號來指；回傳同時附兩者，對人講編號、要精確就用 UUID。
+依人篩選（處理人 / 負責人 / 建立者）只收成員 UUID，不收顯示名——AI 會先讀 `litejira://members` 換 id，
+而不是憑姓名猜人。單張工單的完整內容請讀 `litejira://ticket/{id}`。
 
 ---
 
@@ -114,8 +137,11 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | 症狀 | 解法 |
 |------|------|
 | AI 說找不到 litejira 工具 | 重啟 AI 工具；確認 `claude mcp add` 跑成功 |
-| `AUTH_FAILED` | 確認 `~/.litejira/credentials.env` 的權杖沒打錯 |
-| `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |
+| AI 說某個寫入工具「尚未接上 API v1」 | 正常，本版只開放讀取（見上表）。等下一版 |
+| `unauthenticated` | 確認 `~/.litejira/credentials.env` 的權杖沒打錯，或請 admin 換一把 |
+| `membership_required` / `permission_denied` | 前者是你不在該專案，後者是角色權限不足 → 找 admin |
+| 說「請指定專案」 | credentials.env 加 `LTJ_PROJECT=<key>`，或在資源 URI 帶 `?project=<key>` |
+| `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true`（本版寫入仍未開放） |
 | 啟動拋 HTTP 401 + HTML（不是 JSON） | server 端 API 部署存取設定漂移，不是你的問題 → 找 admin |
 | 多開 session 時連不上 | 改用全域安裝（`npm i -g`），不要用 npx |
 

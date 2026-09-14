@@ -184,11 +184,14 @@ test('addComment 是 POST /tickets/{ticketId}/comments，body 只收 body / ment
   }, function (err) { return err.code === 'invalid_argument' && /body/.test(err.message); });
 });
 
-test('replyFeedback 在 v1 已被取代，本機拒絕並指路 addComment', function () {
+// replyFeedback 是「可選流轉 + 留言」的複合操作，但不是原子操作：舊後端（Code.js:3153）
+// 先流轉再留言，本來就是兩個操作。下一包要做的是 client 端複合（每步各一把穩定且不同的冪等鍵
+// ＋ 明確的部分成功回報），不是被 addComment 取代的舊 action，目前屬於待辦。
+test('replyFeedback 的 v1 契約未取得，本機拒絕為 unmapped_action（非 replaced_action）', function () {
   assert.throws(function () {
     buildRequest({ baseUrl: BASE, token: TOKEN, action: 'replyFeedback', idempotencyKey: KEY, params: {} });
   }, function (err) {
-    return err instanceof LiteJiraTransportError && err.code === 'replaced_action' && /addComment/.test(err.message);
+    return err instanceof LiteJiraTransportError && err.code === 'unmapped_action' && /契約/.test(err.message);
   });
 });
 
@@ -283,7 +286,8 @@ test('未知 action 本機拒絕，且尚未納入的 action 分開報 unmapped_
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'unknown_action'; }
   );
   await assert.rejects(
-    callV1({ fetch: fetchImpl, baseUrl: BASE, token: TOKEN, action: 'transitionTicket', params: {} }),
+    // updateField 的 v1 契約仍未取得（第三包只補基本寫入 9 條），故維持 unmapped_action
+    callV1({ fetch: fetchImpl, baseUrl: BASE, token: TOKEN, action: 'updateField', params: {} }),
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'unmapped_action'; }
   );
   assert.strictEqual(called, 0, '本機拒絕不得送出任何請求');

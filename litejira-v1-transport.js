@@ -1,10 +1,11 @@
 'use strict';
 
-// GH-257 第一包：對外 API v1 傳輸層。
-// 範圍限定：action → REST 映射（本包 7 條路由）、Bearer、Idempotency-Key、
-// { data } 信封拆一層、整趟 deadline（fetch + 讀 body 合計）、Abort 清理、
-// 禁止跟隨 redirect、URL 合法性。
-// 不含：其餘 18 個 MCP tools 的 schema 改寫（下一包）、legacy fallback、寫入自動 retry。
+// GH-257：對外 API v1 傳輸層。
+// 範圍：action → REST 映射、Bearer、Idempotency-Key、{ data } 信封拆一層、
+// 整趟 deadline（fetch + 讀 body 合計）、Abort 清理、禁止跟隨 redirect、URL 合法性。
+// 第三包補上 9 條基本寫入路由（建單 / 留言 / 附件 / 父子 / 轉派 / 轉型 / 關注 / 流轉）。
+// 仍不含：replyFeedback（流轉＋留言複合）、updateField 與三個 batch 的 v1 契約、
+// legacy fallback、寫入自動 retry。
 
 const DEFAULT_TIMEOUT_MS = 20000;
 const API_BASE_PATH = '/api/v1';
@@ -71,7 +72,11 @@ const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
 //
 // route 欄位：
 //   method        HTTP 方法
+//   methodSwitch  由某個布林參數決定 method（例：關注 = PUT / 取消關注 = DELETE）。
+//                 與 method 二擇一；該參數只決定動詞，不進 body / query。
 //   pathTemplate  相對 /api/v1 的路徑，{name} 由 pathParams 取值
+//   pathUuid      路徑參數中必須是 UUID 的（例：attachmentId —— 不是 url、不是序號）
+//   emptyBody     契約上明講「204 無 body」的路由才可設；沒設的路由收到空 body 一律視為違約
 //   query.allow   契約確認過的 query 參數白名單
 //   query.uuid    其中必須是 UUID 的參數（成員 / 父工單一律收 UUID，不收顯示名）
 //   query.multi   可重複出現的多值參數（陣列 → 重複 query，不用逗號串接）
@@ -81,6 +86,11 @@ const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
 //   query.required 契約上必填的 query（缺了本機就擋，不送出半套查詢）
 //   query.exclusive 互斥組：同一組內最多只能出現一個
 //   body.allow / body.required / body.nullable / body.uuid / body.uuidArray / body.url
+//   body.isoString 樂觀鎖時間戳等「原始 ISO 字串」欄位：只收讀取端拿到的原字串，
+//                  不接受 number（Date → ms 會掉微秒精度，撞出假的 version_conflict）
+//   body.object   必須是 plain object 的欄位（例：流轉的 fields）
+//   body.date     純日期欄位：YYYY-MM-DD（不含時間 / 時區，避免換算後落到前後一天）
+//   body.stringArray 字串陣列欄位（例：tags）；要清空請傳 null，不是空字串
 //   rejected      已知「不可直接沿用舊 MCP 參數名」的映射，附指路訊息
 //   contractRef   契約出處
 const ACTION_MAP = Object.freeze({
@@ -233,7 +243,8 @@ const ACTION_MAP = Object.freeze({
       allow: Object.freeze(['parentId', 'expectedUpdatedAt']),
       required: Object.freeze(['parentId']),
       nullable: Object.freeze(['parentId']),
-      uuid: Object.freeze(['parentId'])
+      uuid: Object.freeze(['parentId']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
     }),
     contractRef: 'PUT /api/v1/tickets/{childId}/parent'
   }),
@@ -274,21 +285,177 @@ const ACTION_MAP = Object.freeze({
       kind: 'v1 附件不分 kind，只收 { url, name? }'
     }),
     contractRef: 'POST /api/v1/tickets/{ticketId}/attachments'
+  }),
+
+  // 刪附件是「按 attachmentId 刪」，不是「按 url 比對刪」。
+  // 舊版用 url 當識別，同一個 url 附兩次就無法指名刪哪一筆；v1 的 id 才是唯一鍵。
+  // 回 204 且無 body —— 這是契約明講的，故設 emptyBody。
+  removeAttachment: Object.freeze({
+    method: 'DELETE',
+    pathTemplate: '/tickets/{ticketId}/attachments/{attachmentId}',
+    pathParams: Object.freeze(['ticketId', 'attachmentId']),
+    pathUuid: Object.freeze(['attachmentId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    emptyBody: true,
+    rejected: Object.freeze({
+      url: 'v1 依 attachmentId（UUID）刪除附件；url 不是 id，也不會拿 url 去反查。' +
+        '請先讀 litejira://ticket/{id} 的附件清單取該筆的 id'
+    }),
+    contractRef: 'DELETE /api/v1/tickets/{ticketId}/attachments/{attachmentId}'
+  }),
+
+  // 建單。body 是平攤欄位（沒有巢狀 fields）。project 必填：v1 不會替你挑專案。
+  // 白名單＝後端已核對過的建單欄位全集：核心 6 欄 + 18 個選填欄位。
+  // 選填欄位一律可傳 null（明確清空 / 明確不設），不必為了「沒有值」而繞路寫進 description。
+  // 值域受控的 priority / releaseMethod 在這一層只驗形狀（非空字串），實際值交後端裁決 ——
+  // 本層不自創 enum，猜錯值域會把合法輸入擋在門外。
+  createTicket: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze([
+        'project', 'type', 'title', 'priority', 'description', 'assigneeId',
+        'module', 'subtype', 'releaseMethod', 'stdLevel2', 'stdLevel3',
+        'startDate', 'dueDate', 'tags', 'mrUrl',
+        'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
+        'verifiableVersionAlpha', 'verifiableVersionRelease',
+        'ownerId', 'targetVersion', 'foundVersion'
+      ]),
+      required: Object.freeze(['project', 'type', 'title']),
+      // 18 個附加資料欄可 null；核心 priority / description / assigneeId 可省略但不可 null。
+      nullable: Object.freeze([
+        'module', 'subtype', 'releaseMethod', 'stdLevel2', 'stdLevel3',
+        'startDate', 'dueDate', 'tags', 'mrUrl',
+        'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
+        'verifiableVersionAlpha', 'verifiableVersionRelease',
+        'ownerId', 'targetVersion', 'foundVersion'
+      ]),
+      string: Object.freeze([
+        'project', 'type', 'title', 'priority', 'description',
+        'module', 'subtype', 'releaseMethod', 'stdLevel2', 'stdLevel3', 'mrUrl',
+        'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
+        'verifiableVersionAlpha', 'verifiableVersionRelease',
+        'targetVersion', 'foundVersion'
+      ]),
+      // 後端 validateFieldValue 對選填 TEXT_FIELDS 只驗 typeof string，空字串照收
+      // （title 例外，必須非空）。這裡如果一律要求非空，合法的建單輸入會被前置擋掉。
+      // priority / releaseMethod 不列入：它們是後端裁決的受控值，空字串不在值域內。
+      allowEmptyString: Object.freeze([
+        'description', 'module', 'subtype', 'stdLevel2', 'stdLevel3', 'mrUrl',
+        'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
+        'verifiableVersionAlpha', 'verifiableVersionRelease',
+        'targetVersion', 'foundVersion'
+      ]),
+      uuid: Object.freeze(['assigneeId', 'ownerId']),
+      date: Object.freeze(['startDate', 'dueDate']),
+      stringArray: Object.freeze(['tags'])
+    }),
+    rejected: Object.freeze({
+      assignee: '處理人改用 assigneeId（UUID）；v1 不從顯示名反查成員，請先讀 litejira://members 取 id',
+      owner: '負責人改用 ownerId（UUID）；v1 不從顯示名反查成員，請先讀 litejira://members 取 id',
+      version: '版本欄位在 v1 分成 targetVersion（目標版本）與 foundVersion（發現版本），請明講是哪一個',
+      verifyMethod: '驗證方式在 v1 的欄位名是 validationMethod',
+      notes: 'v1 建單沒有 notes 欄位；補充說明請併入 description',
+      // 建單端點不處理狀態與父子：它們各自有專屬端點，硬塞進建單只會被伺服器丟掉。
+      parentId: '建單端點不掛父子；請先建單，再用 linkTickets（PUT /tickets/{childId}/parent，parentId 收 UUID）掛上',
+      status: '建單不指定狀態（一律由工作流的起始狀態開始）；要改狀態請用 transitionTicket 的動作標籤',
+      expectedUpdatedAt: '建單沒有「既有版本」可鎖，不收 expectedUpdatedAt（樂觀鎖只用於更新既有工單）'
+    }),
+    contractRef: 'POST /api/v1/tickets'
+  }),
+
+  // 轉派。reason 必填（會記進工單歷程），不是可選的客套話。
+  reassignTicket: Object.freeze({
+    method: 'PUT',
+    pathTemplate: '/tickets/{ticketId}/assignee',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['assigneeId', 'reason', 'expectedUpdatedAt']),
+      required: Object.freeze(['assigneeId', 'reason']),
+      string: Object.freeze(['reason']),
+      uuid: Object.freeze(['assigneeId']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    rejected: Object.freeze({
+      newAssignee: '改用 assigneeId（UUID）；v1 不收顯示名，請先讀 litejira://members 取 id'
+    }),
+    contractRef: 'PUT /api/v1/tickets/{ticketId}/assignee'
+  }),
+
+  // 轉換工單類型。目標類型走 type（不是 newType）；subtype 可一併帶上。
+  convertTicketType: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets/{ticketId}/type',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['type', 'subtype', 'expectedUpdatedAt']),
+      required: Object.freeze(['type']),
+      string: Object.freeze(['type', 'subtype']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    rejected: Object.freeze({
+      newType: '目標類型的參數名是 type'
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/type'
+  }),
+
+  // 關注 / 取消關注。v1 是「設定期望狀態」而不是 toggle：
+  // toggle 不冪等（重送一次就翻回去），在會重試的通道上是錯的語意。
+  // watching=true → PUT、false → DELETE；該參數只決定動詞，不進 body。
+  // 兩個動詞都回 { data } 信封（不是 204）——本包唯一的 204 端點是刪附件，
+  // 所以這裡不設 emptyBody：真的收到 204 就是違約，不讓空回應偷偷當成功。
+  setWatchState: Object.freeze({
+    methodSwitch: Object.freeze({ param: 'watching', whenTrue: 'PUT', whenFalse: 'DELETE' }),
+    pathTemplate: '/tickets/{ticketId}/watchers/me',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    contractRef: 'PUT | DELETE /api/v1/tickets/{ticketId}/watchers/me'
+  }),
+
+  // 狀態流轉。action 是動作標籤（getTransitions 回應的 data.actions[].label）。
+  // v1 不收目標狀態：UI 的 toStatus 是後端驗證用的白名單值，對外送出只會撞 invalid_argument。
+  transitionTicket: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets/{ticketId}/transitions',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['action', 'reason', 'fields', 'expectedUpdatedAt']),
+      required: Object.freeze(['action']),
+      string: Object.freeze(['action', 'reason']),
+      object: Object.freeze(['fields']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    rejected: Object.freeze({
+      toStatus: 'v1 的流轉只收動作標籤 action；目標狀態名是後端內部白名單，不對外接受',
+      status: 'v1 的流轉只收動作標籤 action（見 getTransitions 的 data.actions[].label）',
+      extraFields: '連帶欄位的參數名是 fields（物件）',
+      force: 'v1 的流轉端點不收 force；繞過工作流的管理者途徑不在本端點'
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/transitions'
   })
 });
 
 // v1 沒有對應端點、但舊 MCP / CLI 仍可能傳進來的 action：明講改走哪裡，不當成 unknown。
 const REPLACED_ACTIONS = Object.freeze({
-  replyFeedback: 'v1 沒有 replyFeedback；留言請用 addComment（POST /tickets/{ticketId}/comments），狀態流轉是另一條獨立流程'
+  // toggle 是「翻面」，重送一次就翻回去 —— 在會重試的通道上語意是錯的。
+  toggleWatchTicket: 'v1 改成設定期望狀態：action=setWatchState + watching=true|false（PUT / DELETE watchers/me），不再 toggle'
 });
 
-// 尚未納入的舊 action（第三包處理）。第二包補齊了全部讀取路由，
-// 剩下的清一色是寫入端點，契約未取得前一律本機拒絕，不會退回舊後端。
+// 尚未納入的舊 action。第三包補齊了 9 個基本寫入端點，
+// 剩下的是 replyFeedback、updateField 與三個 batch —— 契約未取得前一律本機拒絕，不會退回舊後端。
 // 列在這裡是為了讓錯誤訊息能明講「缺哪一列契約」，而不是回一句籠統的 unknown。
+//
+// replyFeedback 不是被取代的舊 action，但它也不是原子操作：舊 GAS 後端（Code.js:3153）
+// 是「先做可選流轉，再 addComment」兩個獨立操作，中間失敗本來就會留下半套狀態。
+// v1 沒有等價的複合端點，下一包補的是 client 端複合：每步一把穩定且互不相同的冪等鍵，
+// 外加明確的部分成功回報。在那之前一律本機拒絕，不可當成 addComment + transitionTicket 就算了事。
 const PENDING_CONTRACT_ACTIONS = Object.freeze([
-  'removeAttachment', 'updateField', 'createTicket', 'reassignTicket',
-  'convertTicketType', 'toggleWatchTicket', 'transitionTicket',
-  'batchTransition', 'batchReassign', 'batchSetField'
+  'replyFeedback', 'updateField', 'batchTransition', 'batchReassign', 'batchSetField'
 ]);
 
 function isWriteMethod(method) {
@@ -444,6 +611,7 @@ function isPositiveInt_(value) {
 
 function buildPath(route, params) {
   let path = route.pathTemplate;
+  const pathUuid = route.pathUuid || [];
   (route.pathParams || []).forEach((name) => {
     const value = params ? params[name] : undefined;
     if (value === undefined || value === null || value === '') {
@@ -451,6 +619,11 @@ function buildPath(route, params) {
     }
     if (typeof value !== 'string' && typeof value !== 'number') {
       throw invalidArg_('路徑參數「' + name + '」必須是字串或數字（UUID / 工單 key / 數字 key）', { param: name });
+    }
+    // 只有明列為 UUID 的路徑參數（如 attachmentId）才強制 UUID：
+    // 工單參照三形狀通用，但子資源 id 是純 UUID，收到 url / 序號就是叫錯端點。
+    if (pathUuid.indexOf(name) !== -1 && !UUID_PATTERN.test(String(value))) {
+      throw invalidArg_('路徑參數「' + name + '」必須是 UUID（子資源以 id 定位，不以 url 或序號定位）', { param: name });
     }
     // 工單參照可以是 UUID、舊字母 key（BUG-481）或純數字 key，路徑一律 encode 後帶出。
     path = path.replace('{' + name + '}', encodeURIComponent(String(value)));
@@ -460,14 +633,30 @@ function buildPath(route, params) {
 
 function buildBody(route, params) {
   const spec = route.body;
-  if (!spec) return undefined;
+  // 契約上沒有 body 的寫入路由（DELETE 附件、關注切換）：多餘參數一樣要當面拒絕。
+  // 直接 return undefined 會把呼叫端傳的東西靜默吞掉，看起來像成功卻什麼都沒帶。
+  if (!spec) {
+    Object.keys(params || {}).forEach((key) => {
+      if (params[key] === undefined) return;
+      assertRejected_(route, key);
+      throw invalidArg_('端點「' + route.contractRef + '」不收 body；參數「' + key + '」無處可放',
+        { param: key, allowed: [] });
+    });
+    return undefined;
+  }
   const allow = spec.allow || [];
   const required = spec.required || [];
   const nullable = spec.nullable || [];
   const uuidKeys = spec.uuid || [];
   const uuidArrayKeys = spec.uuidArray || [];
   const stringKeys = spec.string || [];
+  // 少數欄位後端只驗型別不驗長度，空字串是合法值；其餘字串欄位維持「非空」。
+  const emptyOkKeys = spec.allowEmptyString || [];
   const urlKeys = spec.url || [];
+  const isoKeys = spec.isoString || [];
+  const objectKeys = spec.object || [];
+  const dateKeys = spec.date || [];
+  const stringArrayKeys = spec.stringArray || [];
   const out = {};
 
   Object.keys(params || {}).forEach((key) => {
@@ -486,7 +675,10 @@ function buildBody(route, params) {
       return;
     }
     if (stringKeys.indexOf(key) !== -1) {
-      if (typeof value !== 'string' || value.trim() === '') {
+      if (typeof value !== 'string') {
+        throw invalidArg_('參數「' + key + '」必須是字串', { param: key });
+      }
+      if (value.trim() === '' && emptyOkKeys.indexOf(key) === -1) {
         throw invalidArg_('參數「' + key + '」必須是非空字串', { param: key });
       }
     }
@@ -506,6 +698,37 @@ function buildBody(route, params) {
     if (urlKeys.indexOf(key) !== -1) {
       assertHttpUrl_(key, value);
     }
+    // 樂觀鎖時間戳：原樣回填讀取端拿到的 ISO 字串。
+    // 收 number 就代表呼叫端已經做過 Date → ms 轉換（掉微秒），那個值送出去只會撞假衝突。
+    if (isoKeys.indexOf(key) !== -1) {
+      if (typeof value === 'number') {
+        throw invalidArg_('參數「' + key + '」必須是讀取端回傳的原始 ISO 字串；' +
+          '轉成毫秒數字會掉精度並撞出假的 version_conflict', { param: key });
+      }
+      if (typeof value !== 'string' || value.trim() === '') {
+        throw invalidArg_('參數「' + key + '」必須是非空的 ISO 8601 字串（原樣回填讀取端的值）', { param: key });
+      }
+    }
+    if (objectKeys.indexOf(key) !== -1) {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw invalidArg_('參數「' + key + '」必須是物件', { param: key });
+      }
+    }
+    // 日期欄位：只收 YYYY-MM-DD（純日期，沒有時區）。
+    // 不接受 Date / ISO 時間戳 —— 帶時區的值換算後可能落到前後一天。
+    if (dateKeys.indexOf(key) !== -1 && !isCalendarDate_(value)) {
+      throw invalidArg_('參數「' + key + '」必須是 YYYY-MM-DD 格式的日期（不含時間與時區）', { param: key });
+    }
+    if (stringArrayKeys.indexOf(key) !== -1) {
+      if (!Array.isArray(value)) {
+        throw invalidArg_('參數「' + key + '」必須是字串陣列（要清空請傳 null）', { param: key });
+      }
+      value.forEach((one) => {
+        if (typeof one !== 'string' || one.trim() === '') {
+          throw invalidArg_('參數「' + key + '」的每個元素都必須是非空字串', { param: key });
+        }
+      });
+    }
     out[key] = value;
   });
 
@@ -515,6 +738,16 @@ function buildBody(route, params) {
     }
   });
   return out;
+}
+
+// YYYY-MM-DD，且必須是真的存在的日期（擋掉 2026-02-30 這種格式對、日子不存在的值）。
+function isCalendarDate_(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parts = value.split('-');
+  const d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  return d.getUTCFullYear() === Number(parts[0]) &&
+    d.getUTCMonth() === Number(parts[1]) - 1 &&
+    d.getUTCDate() === Number(parts[2]);
 }
 
 function assertHttpUrl_(key, value) {
@@ -543,8 +776,11 @@ function buildRequest(options) {
   });
 
   const path = buildPath(route, params);
-  const write = isWriteMethod(route.method);
-  // 寫入路由的非路徑參數走 body，不再另外拼 query（本包 3 條寫入路由都沒有 query）。
+  // methodSwitch：動詞由布林參數決定（關注 = PUT / 取消 = DELETE）。
+  // 取完就從 rest 拿掉——它是動詞本身，不是 body 欄位。
+  const method = resolveMethod_(route, rest);
+  const write = isWriteMethod(method);
+  // 寫入路由的非路徑參數走 body，不再另外拼 query（目前 9 條寫入路由都沒有 query）。
   const search = write ? buildQuery(route, {}) : buildQuery(route, rest);
   const queryString = search.toString();
   const url = base + path + (queryString ? '?' + queryString : '');
@@ -567,10 +803,13 @@ function buildRequest(options) {
       headers['Content-Type'] = 'application/json';
     }
     // Idempotency-Key 只走 header，永遠不進 body / query。
+    // server 端真的會去重：同一把 key 重送 = 回同一個結果；換 key 重送 = 真的做第二次。
+    // 反過來，同一把 key 配不同 body 會拿到 idempotency_key_reused（409）。
     const key = opts.idempotencyKey;
     if (key === undefined || key === null || key === '') {
       throw new LiteJiraTransportError('idempotency_key_required',
-        '寫入必須帶 Idempotency-Key（16-64 字元 [A-Za-z0-9_-]）；重試請沿用同一把 key', { action: opts.action });
+        '寫入必須帶 Idempotency-Key（16-64 字元 [A-Za-z0-9_-]）；重試請沿用同一把 key（server 端會去重）',
+        { action: opts.action });
     }
     if (!IDEMPOTENCY_KEY_PATTERN.test(String(key))) {
       throw invalidArg_('Idempotency-Key 格式錯誤（需 ^[A-Za-z0-9_-]{16,64}$）', { param: 'idempotencyKey' });
@@ -580,7 +819,19 @@ function buildRequest(options) {
   // 讀取路由沒有 body 契約，buildQuery 已把未確認參數擋掉，這裡不會誤帶 body。
   // GET 不去重：即使呼叫端塞了 key 也不掛上去（掛了是雜訊，server 也不看）。
 
-  return { method: route.method, url: url, headers: headers, body: body, write: write, route: route };
+  return { method: method, url: url, headers: headers, body: body, write: write, route: route };
+}
+
+function resolveMethod_(route, rest) {
+  const sw = route.methodSwitch;
+  if (!sw) return route.method;
+  const value = rest[sw.param];
+  if (typeof value !== 'boolean') {
+    throw invalidArg_('參數「' + sw.param + '」必須是布林值：明講要的結果狀態（true / false）。' +
+      'v1 不做 toggle —— toggle 重送一次就翻回去，不是冪等操作。', { param: sw.param });
+  }
+  delete rest[sw.param];
+  return value ? sw.whenTrue : sw.whenFalse;
 }
 
 function isErrorEnvelope_(payload) {
@@ -746,6 +997,19 @@ async function callV1(options) {
     }
 
     if (status >= 200 && status < 300) {
+      // 204 無 body：只有契約明講如此的路由（emptyBody）才放行。
+      // 不放寬到「任何 2xx 空 body」——那會讓其他端點的空回應偷偷當成功過關。
+      const empty = !parsed;
+      if (status === 204 && request.route.emptyBody && empty) {
+        return { ok: true, status: status, data: null, noContent: true };
+      }
+      if (status === 204) {
+        throw new LiteJiraTransportError('invalid_response',
+          request.route.emptyBody
+            ? 'HTTP 204 卻帶了 body，與契約不符（' + request.route.contractRef + '；內容不轉述）'
+            : 'HTTP 204 不在此端點的契約內（' + request.route.contractRef + '）',
+          { status: status });
+      }
       if (!parsed || !isDataEnvelope_(payload)) {
         throw new LiteJiraTransportError('invalid_response',
           'HTTP ' + status + ' 但回應不是 { data } 契約形狀（內容不轉述）', { status: status });

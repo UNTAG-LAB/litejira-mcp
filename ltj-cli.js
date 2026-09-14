@@ -375,7 +375,8 @@ function printUsage_(writeLine) {
   writeLine('注意：成員 / 父工單條件只收 UUID（--assignee-id、link 的 parentId 等），不從顯示名猜人；');
   writeLine('      activity 用 --kind 單選（不帶 = 全部），舊的 --comments/--system 會被明確拒絕；');
   writeLine('      comment 不夾帶狀態流轉，--to-status 會被拒絕，請走獨立的流轉流程；');
-  writeLine('      寫入不自動重試，結果不確定時請用同一把 --idempotency-key 重送。');
+  writeLine('      寫入不自動重試；server 端會依 Idempotency-Key 去重，結果不確定時請用「同一把」');
+  writeLine('      --idempotency-key 重送（換一把會真的再做一次）。');
 }
 
 module.exports = {

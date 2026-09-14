@@ -2,9 +2,11 @@
 
 const readline = require('readline');
 
-// GH-257 第二包：讀取路徑（4 個 read tools + 6 個 resources）改走對外 API v1。
+// GH-257：MCP 改走對外 API v1。
+// 第二包＝讀取面（4 tools + 6 resources + 4 prompts）；第三包＝9 個基本寫入工具
+//（建單 / 留言 / 附件 ±/ 父子 / 轉派 / 轉型 / 關注 / 流轉）。
 // 舊的 postLiteJiraApi（單一 POST + body token）在本檔案已完全不再使用：
-// 尚未取得 v1 契約的 14 個寫入工具一律本機拒絕，不會退回舊後端。
+// 尚未取得 v1 契約的工具（replyFeedback 複合操作 / updateField / 三個 batch）一律本機拒絕，不會退回舊後端。
 const {
   callV1,
   ACTIVITY_KIND_VALUES,
@@ -23,25 +25,24 @@ const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
 // 這裡只擋「三種形狀都不是」的自由字串，不讓它送出去碰運氣；不存在的 key 由後端回 not_found。
 const TICKET_REF_PATTERN =
   '^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z]+-\\d+|\\d+)$';
-// 寫入工具（本包未升級）仍沿用舊的 PREFIX-NNN 形狀說明，但它們在 callTool 就被擋下。
+// 仍未接線的工具（replyFeedback / updateField / 三個 batch）沿用舊的 PREFIX-NNN 形狀說明，
+// 但它們在 callTool 就被擋下，不會真的送出。
 const TICKET_ID_PATTERN = '^(FB|BUG|REQ|EPIC|IDEA|TASK|STD)-\\d+$';
 
 // LJ-116 批次 2: enum 常數（基於 webapp/Code.js:38-40 + UPDATE_FIELD_WHITELIST 2289-2299 事實依據）
 const ENUM_TYPES = ['EPIC', 'REQ', 'BUG', 'IDEA', 'TASK', 'STD'];
-const ENUM_CONVERTIBLE_TYPES = ['EPIC', 'REQ', 'BUG', 'IDEA', 'TASK']; // STD 不可轉
+const ENUM_CREATE_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK', 'STD']; // API v1 CREATABLE_TICKET_TYPES
+// GH-257：v1 的轉型「目標類型」值域 —— IDEA 與 STD 都不能當 target。
+// （舊版只排除 STD，會讓助手以為可以轉成 IDEA，實際會被伺服器擋下。）
+const ENUM_CONVERT_TARGET_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK'];
 const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中文後綴
 // GH-257：order / sort 值域改以傳輸層契約表為單一事實源，避免兩處漂移。
 // v1 的 sort 只有 updatedAt / createdAt / key —— 舊的 priority / dueDate 不在契約內。
 const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
-// LJ-184：發布方式 enum（對齊 webapp/Code.js UPDATE_FIELD_WHITELIST + transitionTicket 送測守衛）
-const ENUM_RELEASE_METHOD = ['待定', '熱更', '換包', '停服'];
-// LJ-184：createTicket / updateField 共用的 releaseMethod 參數 schema（集中維護，避免兩處漂移）
-const P_RELEASE_METHOD = {
-  type: 'string',
-  description: '發布方式（熱更=能上現役熱修線含純後端修復／換包=需重新打包發版／停服=需停機維護），送測必填非待定',
-  enum: ENUM_RELEASE_METHOD
-};
+// GH-257 第三包：releaseMethod 是 v1 的建單欄位，但值域由伺服器裁決 ——
+// 客戶端不寫死 enum（寫死會在後端新增值時把合法輸入擋在門外），只驗「非空字串」，受控值讀 litejira://meta。
+// updateField 仍待接線，屆時以當時確認的白名單為準，不沿用這份可能已漂移的值域。
 const ENUM_UPDATE_FIELDS = [
   'title', 'priority', 'version', 'dueDate', 'startDate',
   'description', 'notes', 'subtype', 'tags', 'mrUrl',
@@ -71,6 +72,32 @@ const P_MEMBER_UUID = (label) => ({
   description: label + '（UUID）。顯示名無法查詢，請先讀 litejira://members 取 id。',
   pattern: UUID_SCHEMA_PATTERN
 });
+// 建單的成員欄位：同樣只收 UUID，但可傳 null（= 不指派）。
+const P_CREATE_MEMBER_UUID = (label) => ({
+  type: ['string', 'null'],
+  description: label + '（UUID）。顯示名無法查詢，請先讀 litejira://members 取 id；null = 不指派。',
+  pattern: UUID_SCHEMA_PATTERN
+});
+// GH-257 第三包：建單的選填欄位一律可傳 null（= 明確不設 / 清空），
+// 所以型別是 ['string','null']；日期欄位只收純日期 YYYY-MM-DD（帶時區的時間戳換算後會落到前後一天）。
+const CREATE_DATE_PATTERN = '^\\d{4}-\\d{2}-\\d{2}$';
+// GH-257：後端 validateFieldValue 對選填 TEXT_FIELDS 只驗 typeof string —— 空字串是合法輸入
+// （會原樣寫入，等同清空該欄），所以這層不能加 minLength 把它擋掉。
+// 例外是受控值欄位（releaseMethod）：值域由後端裁決，空字串不在值域內，仍要求非空。
+const P_CREATE_TEXT = (label, allowEmpty) => {
+  const schema = {
+    type: ['string', 'null'],
+    description: label + '。null = 不設' +
+      (allowEmpty === false ? '（受控值，不收空字串）' : '；空字串 = 寫入空值（後端照收）') + '。'
+  };
+  if (allowEmpty === false) schema.minLength = 1;
+  return schema;
+};
+const P_CREATE_DATE = (label) => ({
+  type: ['string', 'null'],
+  description: label + '：YYYY-MM-DD（純日期，不含時間與時區）。null = 不設。',
+  pattern: CREATE_DATE_PATTERN
+});
 // GH-257：多值查詢條件 —— 單值傳字串，多值傳字串陣列（送出時展開成重複 query，不做逗號串接）。
 const P_MULTI = (description) => ({
   type: ['string', 'array'],
@@ -82,12 +109,20 @@ const P_CURSOR = { type: 'string', description: '分頁 cursor（從前一次回
 const P_ORDER = { type: 'string', description: 'Sort order：asc 或 desc', enum: ENUM_ORDER };
 const P_IDEMPOTENCY = {
   type: 'string',
-  description: 'Idempotency key（16-64 字元 alphanumeric / _ / -），retry 同語意操作請傳同一個 key。注意：server 端未真正去重，純 client 契約紀律。',
+  description: 'Idempotency key（16-64 字元 alphanumeric / _ / -），以 Idempotency-Key header 送出。' +
+    'API v1 的 server 端真的會去重：結果不確定時用「同一把 key」重送是安全的（回同一個結果，不會做第二次）；' +
+    '換一把 key 重送則會真的再做一次。同一把 key 配不同內容會被拒（idempotency_key_reused）。',
   minLength: 16,
   maxLength: 64,
   pattern: '^[a-zA-Z0-9_-]{16,64}$'
 };
-const P_EXPECTED_UPDATED_AT = { type: 'number', description: '樂觀鎖：上一次讀到的 updatedAt（ms timestamp），用於偵測併寫衝突' };
+// GH-257：v1 的 updatedAt 是 ISO 8601 字串（含微秒）。必須原樣回填讀取端拿到的字串 ——
+// 轉成 ms timestamp 會掉精度，比對不上就會撞出假的 version_conflict。
+const P_EXPECTED_UPDATED_AT = {
+  type: 'string',
+  description: '樂觀鎖：把讀取時拿到的 updatedAt「原始 ISO 字串」原樣帶回（例 2026-09-11T03:22:10.123456Z）。' +
+    '不要轉成毫秒數字或重新格式化，會掉精度而撞出假的衝突。省略 = 不做樂觀鎖。'
+};
 // LJ-178：批量工具共用 — 工單 ID 陣列（1-100 張，逐張走與單張相同的後端路徑）
 const P_IDS = {
   type: 'array',
@@ -178,19 +213,33 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.linkTickets',
-    'Set or remove parent-child relationship between tickets (e.g. link BUG to EPIC). Pass parentId=null to unlink.',
+    'Set or remove the parent of a ticket via API v1 (PUT /tickets/{childId}/parent). The child is identified by a UUID, a public key (BUG-481) or a numeric key; the parent MUST be a UUID (display names and public keys are NOT accepted — read the parent with litejira.searchTickets / litejira://ticket/{id} and use its "id"). Pass parentId=null to unlink. Optionally pass expectedUpdatedAt (the raw ISO string you read) for optimistic locking.',
     'linkTickets', true, {
-      childId: { type: 'string', description: '子工單 ID', pattern: TICKET_ID_PATTERN },
-      parentId: { type: ['string', 'null'], description: '父工單 ID；傳 null 解除關聯' },
+      childId: P_TICKET_REF,
+      parentId: {
+        type: ['string', 'null'],
+        description: '父工單 UUID（不是公開 key、不是顯示名）；傳 null 解除父子關聯。',
+        pattern: UUID_SCHEMA_PATTERN
+      },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
-    }, ['childId', 'idempotencyKey'], {
+    }, ['childId', 'parentId', 'idempotencyKey'], {
       destructiveHint: true,
       openWorldHint: true,
       title: '關聯/解除工單父子'
+    }, {
+      v1: { action: 'linkTickets' },
+      removedParams: {
+        parent: '父工單改用 parentId（UUID）',
+        ticketId: '子工單參數名是 childId'
+      }
     }),
+  // GH-257：replyFeedback 不是被取代的舊工具，但它也從來不是原子操作 ——
+  // 舊 GAS 後端（Code.js:3153）是「先做可選流轉，再 addComment」兩個獨立操作，中間失敗就是半套。
+  // v1 沒有等價的複合端點，下一包要補的是「client 端複合」：每個步驟各自一把穩定且互不相同的
+  // 冪等鍵，加上明確的部分成功回報（講清楚哪一步成了、哪一步沒成）。本版先本機拒絕。
   tool('litejira.replyFeedback',
-    'Post a comment AND optionally transition ticket status in one call. Use this when the comment is paired with a status change. For comment-only use addComment instead.',
+    'Post a comment AND optionally transition ticket status. This is NOT atomic and never was: the legacy backend ran the optional transition FIRST and then added the comment — two separate operations, so a mid-way failure leaves the transition applied without the comment. For comment-only use addComment instead. NOT wired to API v1 in this version — calling it is rejected locally. It remains outstanding work: the next package implements it as a CLIENT-SIDE COMPOSITE with a distinct, stable idempotency key per step and explicit partial-success reporting (which step succeeded, which did not). It is NOT simply replaced by addComment + transitionTicket, because that leaves the caller with no defined step order and no partial-success contract.',
     'replyFeedback', true, {
       ticketId: P_TICKET_ID,
       content: { type: 'string', description: '留言內容（Markdown 支援）' },
@@ -203,28 +252,42 @@ const TOOL_DEFS = [
       title: '回覆反饋（含可選狀態轉換）'
     }),
   tool('litejira.attachLink',
-    'Attach a reference URL (doc, design, external page) to a ticket\'s attachment list. NOT for MR/PR links — use updateField(field=\'mrUrl\') for code review links.',
+    'Attach a reference URL (doc, design, external page) to a ticket via API v1 (POST /tickets/{ticketId}/attachments). Body is exactly { url, name? } — v1 attachments have no "kind" classification. Returns the created attachment; keep its "id" — that id (NOT the url) is what litejira.removeAttachment needs.',
     'attachLink', true, {
-      ticketId: P_TICKET_ID,
+      ticketId: P_TICKET_REF,
       url: { type: 'string', description: '參考連結 URL，必須 http:// 或 https:// 開頭' },
-      name: { type: 'string', description: '顯示名稱（省略則用 url）' },
-      kind: { type: 'string', description: '連結分類提示（server 端不限制，free-form）如 doc / design / external' },
+      name: { type: 'string', description: '顯示名稱（省略則由伺服器決定，通常顯示 url 本身）' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'url', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '附加 URL 連結'
+    }, {
+      v1: { action: 'attachLink' },
+      removedParams: {
+        kind: 'v1 的附件不分 kind，只收 { url, name? }；分類資訊請寫進 name'
+      }
     }),
   tool('litejira.removeAttachment',
-    'Remove a previously attached reference URL from a ticket\'s attachment list, matched by url. Idempotent: removing a url that is not attached returns removed:false without error. NOT for MR/PR links — those live in the mrUrl field.',
+    'Remove an attachment from a ticket via API v1 (DELETE /tickets/{ticketId}/attachments/{attachmentId}). Identified by the attachment UUID, NOT by url — read litejira://ticket/{id} (or the attachLink response) to get the attachment id first. Same url attached twice = two distinct ids. Returns 204 with no body on success; a non-existent id returns not_found (it does NOT silently report removed:false).',
     'removeAttachment', true, {
-      ticketId: P_TICKET_ID,
-      url: { type: 'string', description: '要移除的附件 URL（以 attachLink 當初附上的 url 為準）' },
+      ticketId: P_TICKET_REF,
+      attachmentId: {
+        type: 'string',
+        description: '附件 UUID（讀 litejira://ticket/{id} 的附件清單，或沿用 attachLink 回傳的 id）。',
+        pattern: UUID_SCHEMA_PATTERN
+      },
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ticketId', 'url', 'idempotencyKey'], {
+    }, ['ticketId', 'attachmentId', 'idempotencyKey'], {
       destructiveHint: true,
       openWorldHint: true,
-      title: '移除附件連結'
+      title: '移除附件'
+    }, {
+      v1: { action: 'removeAttachment' },
+      removedParams: {
+        url: 'v1 依 attachmentId（UUID）刪除；url 不是 id，也不會拿 url 反查。' +
+          '請先讀 litejira://ticket/{id} 的附件清單取該筆的 id'
+      }
     }),
   tool('litejira.updateField',
     'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee, owner. For MR/PR links: field=\'mrUrl\'. Assignee (處理人) follows member validation; LJ-188/GH-249: changing assignee here also notifies old+new assignee via team Chat (same as reassignTicket, without a reason comment). GH-242: field=\'owner\'（負責人 / 最終負責人，固定，不隨狀態流轉變化）可設成員名或清空（value=null / ""）；與 assignee 處理人區分。releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. LJ-188 WELDED: field=\'status\' WITHOUT force is REJECTED (use_transitionTicket) — all normal transitions MUST go through litejira.transitionTicket (carries send-test 3-field gate 發布方式/修復方式/驗證方式 + role auto-reassign + notification). ADMIN ONLY escape hatch: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
@@ -243,95 +306,160 @@ const TOOL_DEFS = [
     }),
   // LJ-095 新增（5 個）
   tool('litejira.createTicket',
-    'Create a new ticket. Required: type (BUG/REQ/EPIC/IDEA/TASK/STD), title. Optional: priority, assignee, version, description, subtype, module, releaseMethod, etc. BUG type also accepts reproSteps, expectedResult, foundVersion. STD type (LJ-106 客服申訴) also accepts stdLevel2 (二級類目) + stdLevel3 (三級類目); 不支援 subtype / module / parentId。',
+    'Create a ticket via API v1 (POST /tickets). Body is FLAT — core fields: project, type, title, priority?, description?, assigneeId?. ALL of these optional fields are supported too and go straight into the create call (do NOT stuff them into description and do NOT wait until after creation): module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, targetVersion, foundVersion. The 18 additional fields may be null; core priority/description/assigneeId may be omitted but not null; dates are YYYY-MM-DD; tags is an array of strings; assigneeId / ownerId are member UUIDs (display names are NOT accepted — read litejira://members). Controlled values (type / priority / releaseMethod / module / subtype / version strings) come from litejira://meta and litejira://versions; releaseMethod is validated by the server. NOT part of create: status (the workflow start status applies — use litejira.transitionTicket), parentId (create first, then litejira.linkTickets) and expectedUpdatedAt (nothing to lock yet). targetVersion / foundVersion here are version NAMES.',
     'createTicket', true, {
-      type: { type: 'string', description: '工單類型', enum: ENUM_TYPES },
+      project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；兩者皆無會明確報錯（不會自動挑專案）。' },
+      type: { type: 'string', description: '工單類型；IDEA 已退役，不能建單。', enum: ENUM_CREATE_TYPES },
       title: { type: 'string', description: '工單標題' },
-      priority: { type: 'string', description: '優先級（含中文後綴）', enum: ENUM_PRIORITIES },
-      assignee: { type: 'string', description: 'Member 顯示名稱（不是 email）；省略則自動指派（處理人）' },
-      owner: { type: 'string', description: 'GH-242 負責人（最終負責人，固定）顯示名稱（不是 email）；省略留空，之後首次進入開發/進行中類狀態自動補為推進者' },
-      version: { type: 'string', description: '目標版本' },
-      description: { type: 'string', description: '工單描述 / body（Markdown 支援）' },
-      subtype: { type: 'string', description: '子類型。動態值依 type 而定，請先讀 litejira://meta。' },
-      module: { type: 'string', description: '模塊。動態值，請先讀 litejira://meta。' },
-      releaseMethod: P_RELEASE_METHOD, // LJ-184 發布方式（省略則後端預設待定）
-      notes: { type: 'string', description: '內部備註' },
-      reproSteps: { type: 'string', description: 'BUG 重現步驟（BUG type 專用）' },
-      expectedResult: { type: 'string', description: 'BUG 預期結果（BUG type 專用）' },
-      foundVersion: { type: 'string', description: 'BUG 發現版本（BUG type 專用）' },
-      parentId: { type: 'string', description: '父工單 ID（REQ/BUG → EPIC）', pattern: TICKET_ID_PATTERN },
-      dueDate: { type: 'string', description: '到期日（YYYY-MM-DD）' },
-      startDate: { type: 'string', description: '開始日（YYYY-MM-DD）' },
-      stdLevel2: { type: 'string', description: 'STD 客服申訴二級類目。動態值，請先讀 litejira://meta（STD type 專用）。' },
-      stdLevel3: { type: 'string', description: 'STD 客服申訴三級類目。動態值（依 stdLevel2 cascade），請先讀 litejira://meta。' },
+      priority: { type: 'string', description: '優先級（含中文後綴），可省略，不接受 null。', enum: ENUM_PRIORITIES },
+      description: { type: 'string', description: '工單描述（Markdown）；可省略或空字串，不接受 null。' },
+      assigneeId: P_MEMBER_UUID('處理人'),
+      ownerId: P_CREATE_MEMBER_UUID('負責人（最終負責人，不隨狀態流轉變化）'),
+      module: P_CREATE_TEXT('模塊。動態受控值，請先讀 litejira://meta'),
+      subtype: P_CREATE_TEXT('子類型（依 type 而定）。動態受控值，請先讀 litejira://meta'),
+      // releaseMethod 的 v1 值域由後端裁決：本層不寫死 enum（寫死會在後端新增值時擋掉合法輸入）。
+      releaseMethod: P_CREATE_TEXT('發布方式（受控值，例：待定 / 熱更 / 換包 / 停服）。實際值域以 litejira://meta 與伺服器驗證為準', false),
+      stdLevel2: P_CREATE_TEXT('規範二級分類（STD 用）'),
+      stdLevel3: P_CREATE_TEXT('規範三級分類（STD 用）'),
+      startDate: P_CREATE_DATE('開始日期'),
+      dueDate: P_CREATE_DATE('到期日'),
+      tags: {
+        type: ['array', 'null'],
+        description: '標籤（字串陣列）。null = 不設；不要傳逗號串接的單一字串。',
+        items: { type: 'string' }
+      },
+      mrUrl: P_CREATE_TEXT('MR / PR 連結'),
+      reproSteps: P_CREATE_TEXT('重現步驟（BUG 用）—— 這是獨立欄位，不要併進 description'),
+      expectedResult: P_CREATE_TEXT('預期結果（BUG 用）—— 這是獨立欄位，不要併進 description'),
+      fixMethod: P_CREATE_TEXT('修復方式'),
+      validationMethod: P_CREATE_TEXT('驗證方式（舊名 verifyMethod）'),
+      verifiableVersionAlpha: P_CREATE_TEXT('可驗證版本（alpha）'),
+      verifiableVersionRelease: P_CREATE_TEXT('可驗證版本（release）'),
+      targetVersion: P_CREATE_TEXT('目標版本「名稱」（不是版本 UUID）。動態值，請先讀 litejira://versions'),
+      foundVersion: P_CREATE_TEXT('發現版本「名稱」（BUG 常用，不是版本 UUID）。動態值，請先讀 litejira://versions'),
       idempotencyKey: P_IDEMPOTENCY
     }, ['type', 'title', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '建立工單'
+    }, {
+      v1: { action: 'createTicket', defaultProject: 'required' },
+      // 只剩「舊名 → 新名」與「本來就不屬於建單」的指路；建單支援的欄位一律直接收，
+      // 不再叫呼叫端寫進 description 或建單後補做（那會讓資料落在錯的地方）。
+      removedParams: {
+        assignee: '處理人改用 assigneeId（UUID）；請先讀 litejira://members 取 id',
+        owner: '負責人改用 ownerId（UUID）；請先讀 litejira://members 取 id',
+        version: '版本拆成 targetVersion（目標版本）與 foundVersion（發現版本），請明講是哪一個',
+        verifyMethod: '驗證方式的欄位名是 validationMethod',
+        notes: 'v1 建單沒有 notes 欄位；補充說明請併入 description',
+        parentId: '建單端點不掛父子；請先建單，再用 litejira.linkTickets（parentId 收 UUID）掛上',
+        status: '建單不指定狀態（由工作流起始狀態開始）；要改狀態請用 litejira.transitionTicket 的動作標籤',
+        expectedUpdatedAt: '建單沒有既有版本可鎖，不收 expectedUpdatedAt'
+      }
     }),
   tool('litejira.addComment',
-    'Post a comment on a ticket WITHOUT status transition. For comment + status change use replyFeedback instead.',
+    'Post a comment on a ticket via API v1 (POST /tickets/{ticketId}/comments). Body is { body, mentions? } — the comment text parameter is "body", and mentions is an array of member UUIDs (read litejira://members). This endpoint does NOT transition status and does NOT take an optimistic lock: to change status, call litejira.transitionTicket separately.',
     'addComment', true, {
-      ticketId: P_TICKET_ID,
-      content: { type: 'string', description: '留言內容（Markdown 支援）' },
+      ticketId: P_TICKET_REF,
+      body: { type: 'string', description: '留言內容（Markdown 支援）' },
+      mentions: {
+        type: 'array',
+        description: '要 @ 的成員 UUID 陣列（顯示名無效，請先讀 litejira://members 取 id）',
+        items: { type: 'string', pattern: UUID_SCHEMA_PATTERN }
+      },
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ticketId', 'content', 'idempotencyKey'], {
+    }, ['ticketId', 'body', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '新增留言'
+    }, {
+      v1: { action: 'addComment' },
+      removedParams: {
+        content: '留言內文的參數名是 body',
+        transition: '留言不再夾帶狀態流轉；請先留言，再呼叫 litejira.transitionTicket',
+        toStatus: '留言不再夾帶狀態流轉；請先留言，再呼叫 litejira.transitionTicket',
+        expectedUpdatedAt: '留言端點不做樂觀鎖（新增留言不會改動工單版本），故不收 expectedUpdatedAt'
+      }
     }),
   tool('litejira.reassignTicket',
-    'Reassign a ticket to a different member with an optional reason comment. Triggers notification to new assignee. For changing assignee without comment use updateField(field=\'assignee\').',
+    'Reassign a ticket via API v1 (PUT /tickets/{ticketId}/assignee). Body is { assigneeId, reason, expectedUpdatedAt? }: assigneeId is a member UUID (display names are NOT accepted — read litejira://members) and reason is REQUIRED (it is recorded on the ticket history, not optional politeness).',
     'reassignTicket', true, {
-      ticketId: P_TICKET_ID,
-      newAssignee: { type: 'string', description: '新 assignee 顯示名稱（不是 email）。動態值，請先讀 litejira://members。' },
-      reason: { type: 'string', description: '轉派原因（會作為留言寫入工單）' },
+      ticketId: P_TICKET_REF,
+      assigneeId: P_MEMBER_UUID('新處理人'),
+      reason: { type: 'string', description: '轉派原因（必填；會記入工單歷程）' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ticketId', 'newAssignee', 'reason', 'idempotencyKey'], {
+    }, ['ticketId', 'assigneeId', 'reason', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '轉派工單'
+    }, {
+      v1: { action: 'reassignTicket' },
+      removedParams: {
+        newAssignee: '改用 assigneeId（UUID）；v1 不收顯示名，請先讀 litejira://members 取 id',
+        assignee: '改用 assigneeId（UUID）；請先讀 litejira://members 取 id'
+      }
     }),
   tool('litejira.convertTicketType',
-    'Convert ticket type (e.g. BUG→REQ, IDEA→TASK). Allowed conversions: any of BUG/REQ/IDEA/TASK/EPIC can convert to any other. STD type is NOT convertible.',
+    'Convert a ticket to another type via API v1 (POST /tickets/{ticketId}/type). Body is { type, subtype?, expectedUpdatedAt? } — the target parameter is "type", not "newType". Valid targets are EPIC / REQ / BUG / TASK only: IDEA and STD can NOT be conversion targets (an IDEA/STD ticket may still be converted away to one of the four).',
     'convertTicketType', true, {
-      ticketId: P_TICKET_ID,
-      newType: { type: 'string', description: '目標類型（STD 不可轉，故只 5 選 1）', enum: ENUM_CONVERTIBLE_TYPES },
+      ticketId: P_TICKET_REF,
+      type: {
+        type: 'string',
+        description: '目標類型（IDEA 與 STD 不能當目標，故 4 選 1）',
+        enum: ENUM_CONVERT_TARGET_TYPES
+      },
+      subtype: { type: 'string', description: '轉型後的子類型（可省略）。動態值依目標 type 而定，請先讀 litejira://meta。' },
+      expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ticketId', 'newType', 'idempotencyKey'], {
+    }, ['ticketId', 'type', 'idempotencyKey'], {
       destructiveHint: true,
       openWorldHint: true,
       title: '轉換工單類型'
+    }, {
+      v1: { action: 'convertTicketType' },
+      removedParams: {
+        newType: '目標類型的參數名是 type'
+      }
     }),
   tool('litejira.toggleWatch',
-    'Toggle watch/unwatch on a ticket. Watched tickets appear in "我關注的" sidebar filter.',
-    'toggleWatchTicket', true, {
-      ticketId: P_TICKET_ID,
+    'Set whether YOU watch a ticket via API v1 (PUT /tickets/{ticketId}/watchers/me to watch, DELETE to unwatch). You must state the DESIRED result with watching=true|false — despite the tool name there is no blind toggle, because a toggle flips back on retry and is not idempotent. Setting the state you are already in is a no-op success. Watched tickets appear in the "我關注的" sidebar filter. Both verbs return the usual { data } envelope (NOT 204 — the only 204 endpoint is removeAttachment).',
+    'toggleWatch', true, {
+      ticketId: P_TICKET_REF,
+      watching: { type: 'boolean', description: '要的結果狀態：true = 關注、false = 取消關注。必填（沒有盲目切換）。' },
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ticketId', 'idempotencyKey'], {
+    }, ['ticketId', 'watching', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
-      title: '切換工單關注'
+      title: '設定工單關注狀態'
+    }, {
+      v1: { action: 'setWatchState' }
     }),
   // LJ-137 新增（2 個）：動作按鈕流轉對外化 + 查當前可用動作
   tool('litejira.transitionTicket',
-    'One-shot status transition by action-button label, WITH automatic role-based reassignment (首次認領→點按者 / 回流→上一手開發者 / 前進→目標 role 預設人). Equivalent to the webapp Drawer action buttons. The "action" label must be one currently available for the ticket — call litejira.getTransitions FIRST to get valid labels. To set status WITHOUT auto-reassign use updateField(field=\'status\') instead. 退回類動作（getTransitions 回傳 direction=back，如 alpha不通過/release不通過/MR打回/退回/退單）必須帶 reason，否則後端拒絕（GH-215：原因會記入工單歷程供被打回的開發者查看）。',
+    'Perform a status transition via API v1 (POST /tickets/{ticketId}/transitions), WITH the workflow\'s automatic role-based reassignment (首次認領→操作者 / 回流→上一手開發者 / 前進→目標 role 預設人). Body is { action, reason?, fields?, expectedUpdatedAt? }. "action" is an ACTION LABEL, not a target status: call litejira.getTransitions FIRST and use a label from data.actions[] — v1 does NOT accept a target status name. Back-type actions (alpha不通過 / release不通過 / MR打回 / 退回 / 退單) require reason, or the backend rejects the call. Extra fields required by the transition (e.g. the send-to-test trio) go in "fields".',
     'transitionTicket', true, {
-      ticketId: P_TICKET_ID,
-      action: { type: 'string', description: '動作標籤（如「開始開發」「送alpha測試」「alpha不通過」）。合法值依工單當前狀態而定，請先呼叫 litejira.getTransitions 取得。' },
+      ticketId: P_TICKET_REF,
+      action: { type: 'string', description: '動作標籤（如「開始開發」「送alpha測試」「alpha不通過」）。合法值依工單當前狀態而定，請先呼叫 litejira.getTransitions，取 data.actions[] 裡的標籤。' },
+      reason: { type: 'string', description: '退回類動作必填的原因，說明哪裡不通過；會記入工單歷程。前進類動作可省略。' },
+      fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項與欄位名以 getTransitions 的回應與伺服器錯誤訊息為準。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
-      extraFields: { type: 'object', description: '連帶欄位（不覆蓋 status/assignee）。LJ-188 送測（進 alpha/release 測試 / 熱修待合 release）三欄必備，缺項在此帶入：{ fixMethod: "修復方式", verifyMethod: "驗證方式", releaseMethod: "熱更/換包/停服" }。' },
-      reason: { type: 'string', description: 'GH-215：退回類動作（direction=back）必填的原因，說明測試哪裡不通過；會記入工單歷程。前進類動作可省略。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'action', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '流轉工單狀態（動作按鈕，含自動轉派）'
+    }, {
+      v1: { action: 'transitionTicket' },
+      removedParams: {
+        extraFields: '連帶欄位的參數名是 fields（物件）',
+        toStatus: 'v1 只收動作標籤 action；目標狀態名是後端內部白名單，不對外接受。請用 litejira.getTransitions 的 data.actions[] 標籤',
+        status: 'v1 只收動作標籤 action（見 litejira.getTransitions 的 data.actions[]）',
+        force: '此端點不收 force'
+      }
     }),
   tool('litejira.getTransitions',
-    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read actions[] for the labels that are valid transition actions. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels. NOTE: performing a transition (litejira.transitionTicket / litejira.batchTransition) is NOT available in this version — its v1 write contract is not wired yet.',
+    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read data.actions[] and pass an action label to litejira.transitionTicket. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels — never pass those to transitionTicket. NOTE: the BATCH variant (litejira.batchTransition) is still not available in this version.',
     'getAllowedTransitions', false, {
       ticketId: P_TICKET_REF
     }, ['ticketId'], {
@@ -437,7 +565,7 @@ const RESOURCE_DEFS = [
 const PROMPT_DEFS = [
   {
     name: 'report-bug',
-    description: '回報 BUG — 引導填寫標題/重現步驟/預期結果，讀 meta/members/versions 備妥受控值，產出建單草稿（本版不自動建單）',
+    description: '回報 BUG — 引導填寫標題/重現步驟/預期結果，讀 meta/members/versions 備妥受控值，草稿確認後用 litejira.createTicket 建單',
     arguments: [
       { name: 'title', description: 'BUG 標題（可選，會再確認）', required: false },
       { name: 'project', description: '專案 key（可選；省略則用啟動設定的 LTJ_PROJECT）', required: false }
@@ -460,7 +588,7 @@ const PROMPT_DEFS = [
   },
   {
     name: 'close-ticket',
-    description: '關閉工單 — 讀工單 + 可用流轉動作，列出到結案的合法路徑（本版不執行流轉）',
+    description: '關閉工單 — 讀工單 + 可用流轉動作，列出到結案的合法路徑，確認後用 litejira.transitionTicket 逐步執行',
     arguments: [
       { name: 'ticketId', description: '工單參照：UUID、公開 key（BUG-481）或純數字 key', required: true }
     ]
@@ -529,9 +657,11 @@ function getConfigFromEnv(env) {
 function assertMigrated_(def) {
   if (!def.pending) return;
   throw mcpError_('TOOL_NOT_MIGRATED',
-    '工具「' + def.name + '」尚未接上 API v1（其 v1 端點契約未取得），本機拒絕呼叫，' +
-    '不會退回舊後端。本版可用的是讀取工具：litejira.searchTickets / listComments / getActivityLog / getTransitions，' +
-    '以及 litejira:// 資源。寫入工具將在下一個版本接齊。',
+    '工具「' + def.name + '」尚未接上 API v1（其 v1 端點契約未取得），本機拒絕呼叫，不會退回舊後端。' +
+    '本版可用：讀取工具（searchTickets / listComments / getActivityLog / getTransitions）、' +
+    'litejira:// 資源，以及基本寫入工具（createTicket / addComment / attachLink / removeAttachment / ' +
+    'linkTickets / reassignTicket / convertTicketType / toggleWatch / transitionTicket）。' +
+    '仍未接線的是 replyFeedback（流轉＋留言的複合操作，下一包補）、updateField 與三個 batch 工具。',
     { tool: def.name, action: def.action }, -32601);
 }
 
@@ -544,10 +674,22 @@ async function callTool(name, args, config, fetchImpl) {
   if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', 'LTJ_API_URL and LTJ_API_TOKEN are required (legacy LTJ_API_PAT also accepted)');
   if (def.write && !cfg.enableWrites) throw mcpError_('WRITES_DISABLED', 'write tools require LTJ_MCP_ENABLE_WRITES=true');
 
-  const params = toV1Params_(def, validateToolInput(def, args || {}), cfg);
+  const input = validateToolInput(def, args || {});
+  // Idempotency-Key 走 header，不是 body 欄位：在這裡抽出來，別讓它混進 params。
+  const idempotencyKey = input.idempotencyKey;
+  const params = toV1Params_(def, input, cfg);
 
-  const outcome = await callV1Or_(def.v1.action, params, cfg, fetchImpl);
+  const outcome = await callV1Or_(def.v1.action, params, cfg, fetchImpl, idempotencyKey);
   if (outcome.isError) return outcome;
+  // 契約上「204 無 body」的端點（本包只有刪附件）：沒有 data 可回。
+  // 不編一個假的 { removed: true } 出來 —— 那會讓呼叫端以為伺服器真的說了什麼。
+  if (outcome.noContent) {
+    const ack = { ok: true, status: outcome.status, noContent: true };
+    return {
+      content: [{ type: 'text', text: JSON.stringify(ack) }],
+      structuredContent: ack
+    };
+  }
   // v1 的 { data } 信封已由傳輸層拆掉一層，這裡拿到的就是契約裡的 data，原樣送出：
   // 新 shape（UUID id / 公開 key / member { id, name } / nextCursor）不做任何加工或改名。
   const data = outcome.value;
@@ -559,14 +701,17 @@ async function callTool(name, args, config, fetchImpl) {
   };
 }
 
-// MCP 參數 → v1 params。MCP 端刻意沿用契約參數名，這裡只處理三件事：
-//   1. ticketId → 該路由實際的路徑參數名（ticket / ticketId）
-//   2. project 預設值（僅 searchTickets；沒有 LTJ_PROJECT 就不帶，等於跨專案搜尋）
-//   3. 其餘原樣帶出 —— 不做任何改名或值域轉換，讓傳輸層的白名單是唯一守門人
+// MCP 參數 → v1 params。MCP 端刻意沿用契約參數名，這裡只處理四件事：
+//   1. idempotencyKey 抽掉（它是 header，不是查詢 / body 欄位）
+//   2. ticketId → 該路由實際的路徑參數名（ticket / ticketId）
+//   3. project 預設值：'required' 的路由（建單）缺了就明確報錯，不猜專案；
+//      searchTickets 則是沒有就不帶條件，等於跨專案搜尋
+//   4. 其餘原樣帶出 —— 不做任何改名或值域轉換，讓傳輸層的白名單是唯一守門人
 function toV1Params_(def, input, cfg) {
   const wiring = def.v1;
   const out = {};
   Object.keys(input).forEach((key) => { out[key] = input[key]; });
+  delete out.idempotencyKey;
   if (wiring.ticketParam && out.ticketId !== undefined) {
     out[wiring.ticketParam] = out.ticketId;
     if (wiring.ticketParam !== 'ticketId') delete out.ticketId;
@@ -574,11 +719,18 @@ function toV1Params_(def, input, cfg) {
   if (wiring.defaultProject && out.project === undefined && cfg.project) {
     out.project = cfg.project;
   }
+  if (wiring.defaultProject === 'required' && out.project === undefined) {
+    throw mcpError_('PROJECT_REQUIRED',
+      '工具「' + def.name + '」需要指定專案。請在參數帶 project=<KEY>，' +
+      '或在啟動環境設定 LTJ_PROJECT=<KEY>。（不會自動選用任一專案。）',
+      { tool: def.name }, -32602);
+  }
   return out;
 }
 
 // 共用的 v1 呼叫 + 錯誤轉譯。回 { value } 或 MCP 的 isError 結果。
-async function callV1Or_(action, params, cfg, fetchImpl) {
+// idempotencyKey 只有寫入路由會用到；讀取路由給了也不會掛上去（傳輸層決定）。
+async function callV1Or_(action, params, cfg, fetchImpl, idempotencyKey) {
   const fetchFn = fetchImpl || globalThis.fetch;
   if (!fetchFn) throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
   let result;
@@ -588,7 +740,8 @@ async function callV1Or_(action, params, cfg, fetchImpl) {
       baseUrl: cfg.apiUrl,
       token: cfg.token,
       action: action,
-      params: params
+      params: params,
+      idempotencyKey: idempotencyKey
     });
   } catch (err) {
     if (err instanceof LiteJiraApiError) {
@@ -601,7 +754,7 @@ async function callV1Or_(action, params, cfg, fetchImpl) {
     }
     throw err;
   }
-  return { value: result.data };
+  return { value: result.data, noContent: !!result.noContent, status: result.status };
 }
 
 // 業務錯誤 → isError 結果。details 一併帶出（structuredContent 讓主機拿得到結構化原文）。
@@ -669,15 +822,21 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           },
           serverInfo: { name: 'litejira-mcp', version: PKG_VERSION },
           // GH-265：啟動指令只保留操作安全規則，歷史背景留在規格文件，避免每個 session 重複載入。
-          // GH-257 第二包：改述 v1 讀取契約；寫入尚未接線，明講以免助手繞路自創寫法。
+          // GH-257 第三包：補上基本寫入的操作紀律（冪等鍵、動作標籤、期望關注狀態、樂觀鎖字串）；
+          // 仍未接線的工具明講，免得助手繞路自創寫法。
           instructions: [
             'LiteJira MCP 操作規則（API v1）：',
-            '- 本版只提供讀取：searchTickets / listComments / getActivityLog / getTransitions 與 litejira:// 資源。寫入工具（建單/留言/改欄位/流轉/批量）尚未接上 v1，呼叫會被拒絕，請改交草稿給使用者。',
-            '- 工單參照可用 UUID 主鍵、公開 key（BUG-481）或純數字 key；回傳同時有 UUID id 與公開 key，對人講 key、要精確就用 id。',
-            '- 成員條件只收 UUID：assigneeId / ownerId / creatorId（顯示名無效）。先讀 litejira://members 取 id。',
-            '- 受控值讀 litejira://meta，版本讀 litejira://versions，狀態流轉讀 litejira://workflow/{type}；別沿用記憶中的舊值域。',
-            '- 專案層級資源（meta/versions/dashboard/workflow）取 LTJ_PROJECT，或在 URI 帶 ?project=KEY；沒有就會報錯，不要亂猜專案。',
-            '- 清單用 limit + cursor 分頁（把 nextCursor 當 cursor 帶回），limit 上限 100；type/status/priority 等條件可傳陣列一次帶多值。',
+            '- 寫入必帶 idempotencyKey（16-64 字元）；server 真的會去重，結果不明用同一把重送，換 key 會做第二次。',
+            '- 未接線：replyFeedback（流轉＋留言，本來就非原子）、updateField、三個 batch —— 呼叫會被拒，請改交草稿。',
+            '- 建單一次填齊：reproSteps / expectedResult / module / subtype / 日期 / tags / ownerId 都是 createTicket 正式欄位，別塞進 description 或事後補。',
+            '- 改狀態走 transitionTicket，只收動作標籤：先 getTransitions 取 data.actions[] 的 label（transitions 是狀態白名單）。退回類要帶 reason。',
+            '- toggleWatch 要帶 watching=true|false（沒有盲目切換）；刪附件用 attachmentId（UUID）不是 url。',
+            '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（掉精度會撞假衝突）。',
+            '- 工單參照可用 UUID id、公開 key（BUG-481）或純數字 key；對人講 key，要精確用 id。',
+            '- 成員條件只收 UUID：assigneeId / ownerId / creatorId（顯示名無效）；先讀 litejira://members 取 id。',
+            '- 受控值讀 litejira://meta，版本讀 litejira://versions，流轉讀 litejira://workflow/{type}；別沿用舊值域。',
+            '- 專案層級資源取 LTJ_PROJECT 或在 URI 帶 ?project=KEY；沒有就報錯，不要猜專案。',
+            '- 清單用 limit + cursor 分頁（nextCursor 當 cursor 帶回），limit 上限 100；type/status/priority 可傳陣列帶多值。',
             '- activity 用 kind=user|system 單選過濾，不帶 kind 才是全部。'
           ].join('\n')
         }
@@ -959,9 +1118,11 @@ async function readResource_(uri, config, fetchImpl) {
 // GH-257：統一結尾語 —— 本版寫入工具尚未接上 v1 契約，呼叫會被本機拒絕。
 // prompt 直接講明，免得助手一路走到最後才撞牆、或自行編造替代寫法。
 const WRITE_PENDING_NOTE =
-  '注意：本版 litejira MCP 只開放讀取工具（searchTickets / listComments / getActivityLog / getTransitions 與 litejira:// 資源）。' +
-  '建單、留言、改欄位、流轉狀態等寫入工具尚未接上 API v1，呼叫會被直接拒絕 —— ' +
-  '請把結果整理成草稿交給我，不要嘗試用其他方式代為寫入。';
+  '注意：本版可用的寫入工具是 createTicket / addComment / attachLink / removeAttachment / linkTickets / ' +
+  'reassignTicket / convertTicketType / toggleWatch / transitionTicket，且需要伺服器啟用寫入（LTJ_MCP_ENABLE_WRITES）。' +
+  '留言＋狀態流轉的複合操作（replyFeedback）、單一欄位更新（updateField）與三個 batch 工具尚未接上 API v1，' +
+  '呼叫會被直接拒絕 —— 那類需求請整理成草稿交給我。' +
+  '任何寫入前先把要送出的內容給我確認，並帶上 idempotencyKey。';
 
 // 專案子句：prompt 參數有給就明講，沒給就交代改用啟動設定。
 function projectClause_(project) {
@@ -984,7 +1145,10 @@ function getPromptMessages_(name, args) {
             '請先讀 litejira://meta（類型/優先級/子類型/模塊受控值）、litejira://members（成員名冊，含 UUID id）、' +
             'litejira://versions（版本清單），一律採用讀回來的實際值，不要沿用記憶中的舊值域。' +
             '然後問我：標題、重現步驟、預期結果、優先級、發現版本。' +
-            '最後輸出一份建單草稿（欄位: 值），成員欄位請同時列出顯示名與 UUID id。' +
+            '先輸出一份建單草稿（欄位: 值），成員欄位請同時列出顯示名與 UUID id；我確認後再用 litejira.createTicket 建單。' +
+            '重現步驟與預期結果請放在 reproSteps / expectedResult 這兩個獨立欄位（不要併進 description）；' +
+            'module / subtype / releaseMethod / startDate / dueDate（YYYY-MM-DD）/ tags（字串陣列）/ mrUrl / ownerId / ' +
+            'targetVersion / foundVersion 等欄位建單時就能一次填齊，不用建完再補；沒有值就傳 null 或整個省略。' +
             WRITE_PENDING_NOTE
         }
       }];
@@ -1025,8 +1189,9 @@ function getPromptMessages_(name, args) {
           text: '幫我確認工單 ' + (ticket || '（請提供工單參照）') + ' 要怎麼收尾。' +
             '先讀 litejira://ticket/' + (ticket || '{id}') + ' 取現況，' +
             '再呼叫 litejira.getTransitions（ticketId=' + (ticket || '{id}') + '）取當前實際可用的動作，' +
-            '以回應中的 actions[].label 為準；同一份回應裡的 transitions 是目標狀態白名單，不是動作名稱，別混用。' +
-            '若一步到不了結案狀態，請列出完整的中間步驟順序讓我確認。' +
+            '以回應中 data.actions[] 的 label 為準；同一份回應裡的 transitions 是目標狀態白名單，不是動作名稱，別混用。' +
+            '若一步到不了結案狀態，請列出完整的中間步驟順序讓我確認；我同意後再用 litejira.transitionTicket 一步一步執行，' +
+            '每一步都重新呼叫 getTransitions 取當下可用的動作標籤（退回類動作要帶 reason）。' +
             WRITE_PENDING_NOTE
         }
       }];

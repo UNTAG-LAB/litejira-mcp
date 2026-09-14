@@ -294,25 +294,33 @@ test('403 底下三種互斥語意各自保留，不被狀態碼壓成同一種'
 
 // ── 未升級的寫入工具：保持禁用，且不得退回舊後端 ──
 
-test('本包只公告 4 個已接線的讀取工具，14 個寫入工具不出現在 tools/list', async function () {
+// GH-257 第三包：9 個基本寫入工具接線後，tools/list 變成 4 讀 + 9 寫；
+// 仍未接線的是 replyFeedback（流轉＋留言複合，下一包）/ updateField 與三個 batch。
+test('tools/list 只公告已接線的工具：4 個讀取 + 9 個基本寫入', async function () {
   const names = listTools().map((t) => t.name);
   assert.deepStrictEqual(names.sort(), [
+    'litejira.addComment',
+    'litejira.attachLink',
+    'litejira.convertTicketType',
+    'litejira.createTicket',
     'litejira.getActivityLog',
     'litejira.getTransitions',
+    'litejira.linkTickets',
     'litejira.listComments',
-    'litejira.searchTickets'
+    'litejira.reassignTicket',
+    'litejira.removeAttachment',
+    'litejira.searchTickets',
+    'litejira.toggleWatch',
+    'litejira.transitionTicket'
   ]);
 });
 
-test('未升級的 14 個寫入工具一律本機拒絕，一發請求都不送（即使 enableWrites=true）', async function () {
+test('未升級的 5 個工具一律本機拒絕，一發請求都不送（即使 enableWrites=true）', async function () {
   const pending = [
-    'litejira.linkTickets', 'litejira.replyFeedback', 'litejira.attachLink',
-    'litejira.removeAttachment', 'litejira.updateField', 'litejira.createTicket',
-    'litejira.addComment', 'litejira.reassignTicket', 'litejira.convertTicketType',
-    'litejira.toggleWatch', 'litejira.transitionTicket', 'litejira.batchTransition',
-    'litejira.batchReassign', 'litejira.batchSetField'
+    'litejira.replyFeedback', 'litejira.updateField',
+    'litejira.batchTransition', 'litejira.batchReassign', 'litejira.batchSetField'
   ];
-  assert.strictEqual(pending.length, 14);
+  assert.strictEqual(pending.length, 5);
 
   const fetchImpl = neverFetch();
   for (const name of pending) {
@@ -483,11 +491,12 @@ test('四個 prompt 逐一 prompts/get，內容對齊 v1 讀取流程且不指�
     assert.ok(!response.error, pair[0] + '：' + JSON.stringify(response.error));
     const text = response.result.messages[0].content.text;
     assert.ok(text.length > 0, pair[0] + ' 訊息不可為空');
-    // 不得指示助手呼叫本版拿不到的寫入工具
-    ['createTicket', 'updateField', 'addComment', 'transitionTicket', 'reassignTicket'].forEach(function (writeTool) {
-      assert.ok(text.indexOf('呼叫 ' + writeTool) === -1,
-        pair[0] + ' 不該指示呼叫未支援的 ' + writeTool);
-    });
+    // 不得指示助手呼叫本版仍拿不到的工具（第三包後只剩 updateField 與三個 batch）
+    ['updateField', 'batchTransition', 'batchReassign', 'batchSetField', 'replyFeedback']
+      .forEach(function (missingTool) {
+        assert.ok(text.indexOf('litejira.' + missingTool) === -1,
+          pair[0] + ' 不該指示呼叫未支援的 ' + missingTool);
+      });
   }
 });
 
@@ -496,7 +505,12 @@ test('report-bug 帶 project 時明講專案，triage 指名成員 UUID，close 
   const bugText = bug.result.messages[0].content.text;
   assert.match(bugText, /OTHER/);
   assert.match(bugText, /litejira:\/\/meta/);
-  assert.match(bugText, /不要嘗試用其他方式代為寫入/);
+  // 建單已接線：prompt 要指名 createTicket，並要求重現步驟 / 預期結果走各自的獨立欄位
+  assert.match(bugText, /litejira\.createTicket/);
+  assert.match(bugText, /description/);
+  assert.match(bugText, /reproSteps/);
+  assert.match(bugText, /expectedResult/);
+  assert.match(bugText, /idempotencyKey/);
 
   const triage = await rpc('prompts/get', { name: 'triage-ticket', arguments: { ticketId: 'BUG-481' } }, cfg(), neverFetch());
   const triageText = triage.result.messages[0].content.text;
@@ -507,7 +521,11 @@ test('report-bug 帶 project 時明講專案，triage 指名成員 UUID，close 
   const close = await rpc('prompts/get', { name: 'close-ticket', arguments: { ticketId: UUID } }, cfg(), neverFetch());
   const closeText = close.result.messages[0].content.text;
   assert.match(closeText, /getTransitions/);
-  assert.match(closeText, /actions\[\]\.label/);
+  assert.match(closeText, /data\.actions\[\]/);
+  assert.match(closeText, /label/);
+  // 流轉已接線：要指名 transitionTicket，並提醒退回類動作帶 reason
+  assert.match(closeText, /litejira\.transitionTicket/);
+  assert.match(closeText, /reason/);
   assert.ok(closeText.indexOf(UUID) !== -1);
 
   const weekly = await rpc('prompts/get', { name: 'weekly-status', arguments: {} }, cfg(), neverFetch());

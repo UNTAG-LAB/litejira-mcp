@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 
 const readline = require('readline');
+const crypto = require('crypto');
 
 // GH-257：MCP 改走對外 API v1。
 // 第二包＝讀取面（4 tools + 6 resources + 4 prompts）；第三包＝9 個基本寫入工具
-//（建單 / 留言 / 附件 ±/ 父子 / 轉派 / 轉型 / 關注 / 流轉）。
-// 舊的 postLiteJiraApi（單一 POST + body token）在本檔案已完全不再使用：
-// 尚未取得 v1 契約的工具（replyFeedback 複合操作 / updateField / 三個 batch）一律本機拒絕，不會退回舊後端。
+//（建單 / 留言 / 附件 ±/ 父子 / 轉派 / 轉型 / 關注 / 流轉）；
+// 第四包＝updateField / replyFeedback / 三個 batch，全部 18 個工具接線完畢。
+// 舊的 postLiteJiraApi（單一 POST + body token）在本檔案已完全不再使用，也沒有 legacy fallback。
 const {
   callV1,
   ACTIVITY_KIND_VALUES,
+  BATCH_MAX_TICKETS,
   LiteJiraApiError,
   LiteJiraTransportError,
+  NORMAL_FIELDS,
   ORDER_VALUES,
   SORT_VALUES
 } = require('./litejira-v1-transport');
@@ -25,9 +28,6 @@ const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
 // 這裡只擋「三種形狀都不是」的自由字串，不讓它送出去碰運氣；不存在的 key 由後端回 not_found。
 const TICKET_REF_PATTERN =
   '^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z]+-\\d+|\\d+)$';
-// 仍未接線的工具（replyFeedback / updateField / 三個 batch）沿用舊的 PREFIX-NNN 形狀說明，
-// 但它們在 callTool 就被擋下，不會真的送出。
-const TICKET_ID_PATTERN = '^(FB|BUG|REQ|EPIC|IDEA|TASK|STD)-\\d+$';
 
 // LJ-116 批次 2: enum 常數（基於 webapp/Code.js:38-40 + UPDATE_FIELD_WHITELIST 2289-2299 事實依據）
 const ENUM_TYPES = ['EPIC', 'REQ', 'BUG', 'IDEA', 'TASK', 'STD'];
@@ -42,20 +42,33 @@ const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
 // GH-257 第三包：releaseMethod 是 v1 的建單欄位，但值域由伺服器裁決 ——
 // 客戶端不寫死 enum（寫死會在後端新增值時把合法輸入擋在門外），只驗「非空字串」，受控值讀 litejira://meta。
-// updateField 仍待接線，屆時以當時確認的白名單為準，不沿用這份可能已漂移的值域。
-const ENUM_UPDATE_FIELDS = [
-  'title', 'priority', 'version', 'dueDate', 'startDate',
-  'description', 'notes', 'subtype', 'tags', 'mrUrl',
-  'reproSteps', 'expectedResult', 'verifyMethod', 'fixMethod',
-  'verifiableVersionAlpha', 'verifiableVersionRelease', 'foundVersion', 'module', 'parentId',
-  'stdLevel2', 'stdLevel3',
-  'releaseMethod', // LJ-184 發布方式（待定/熱更/換包/停服）
-  'status', 'assignee',
-  'owner' // GH-242 負責人（最終負責人，固定，可空；null 清空）
-];
+//
+// GH-257 第四包：updateField 的白名單改以 v1 契約為單一事實源。
+// 一般欄位（NORMAL_FIELDS）走 PATCH；另外四個是「有專屬端點」的欄位，各有自己的必填條件：
+//   parentId（PUT /parent，只收 UUID）/ assigneeId（PUT /assignee，reason 必填）
+//   targetVersion / foundVersion（PUT /versions，收版本 UUID）/ status（PUT /status，需 force=true）
+const ENUM_UPDATE_FIELDS = NORMAL_FIELDS.concat([
+  'parentId', 'assigneeId', 'targetVersion', 'foundVersion', 'status'
+]);
+// 舊白名單裡在 v1 已改名或已不存在的欄位名。落在這裡就明確指路，不回一句籠統的 invalid。
+// notes 是「沒有等價欄位」：本層不代為搬進 description（那會蓋掉既有內容），直接要求呼叫端改寫。
+const UPDATE_FIELD_LEGACY = {
+  verifyMethod: '驗證方式在 v1 的欄位名是 validationMethod',
+  owner: '負責人在 v1 的欄位名是 ownerId，值是成員 UUID（null = 清空）；請先讀 litejira://members 取 id',
+  assignee: '處理人在 v1 的欄位名是 assigneeId，值是成員 UUID，且 reason 必填（會記入工單歷程）',
+  version: '版本在 v1 分成 targetVersion（目標版本）與 foundVersion（發現版本），' +
+    '且 value 收的是版本「UUID」（不是版本名稱）；請先讀 litejira://versions 取 id，並明講是哪一個',
+  notes: 'v1 沒有 notes 欄位，也沒有等價欄位。補充說明請改寫進 description（field=description）——' +
+    '本工具不會替你把內容搬到別的欄位，以免覆蓋既有描述'
+};
+// 批次版的指路表：多了「這個欄位有專屬批次工具」兩條（處理人 / 狀態）。
+const BATCH_FIELD_LEGACY = Object.assign({}, UPDATE_FIELD_LEGACY, {
+  assignee: '批量轉派請改用 litejira.batchReassign（assigneeId 收 UUID，reason 必填）',
+  assigneeId: '批量轉派請改用 litejira.batchReassign（assigneeId 收 UUID，reason 必填）',
+  status: '狀態不是批次欄位：請改用 litejira.batchTransition 的動作標籤（批次沒有管理者強制途徑）'
+});
 
 // LJ-116: 常用參數 schema（給多個工具引用，集中維護）
-const P_TICKET_ID = { type: 'string', description: 'Ticket ID with prefix (FB/BUG/REQ/EPIC/IDEA/TASK/STD)-NNN，例如 BUG-481 / REQ-205。注意：LJ/DEV 是 LiteJira 自身開發編號（住 BACKLOG.md），非試算表工單，不接受。', pattern: TICKET_ID_PATTERN };
 // GH-257：v1 讀取端點的工單參照 — UUID（主鍵）/ 公開 key（BUG-481）/ 純數字 key 三選一。
 const P_TICKET_REF = {
   type: 'string',
@@ -110,8 +123,12 @@ const P_ORDER = { type: 'string', description: 'Sort order：asc 或 desc', enum
 const P_IDEMPOTENCY = {
   type: 'string',
   description: 'Idempotency key（16-64 字元 alphanumeric / _ / -），以 Idempotency-Key header 送出。' +
-    'API v1 的 server 端真的會去重：結果不確定時用「同一把 key」重送是安全的（回同一個結果，不會做第二次）；' +
-    '換一把 key 重送則會真的再做一次。同一把 key 配不同內容會被拒（idempotency_key_reused）。',
+    'API v1 的 server 端會去重，但只在 24 小時保留期內、且輸入完全相同時成立：' +
+    '結果不確定時，在保留期內用「同一把 key ＋一模一樣的輸入」重送會回同一個結果、不會做第二次；' +
+    '保留期過後同一把 key 會被當成全新請求真的再做一次（不存在「無限期可安全重放」這回事）。' +
+    '換一把 key 重送一定會再做一次。同一把 key 配不同內容會被拒（idempotency_key_reused，' +
+    'details.reason=request_mismatch）；前一次同 key 請求還在跑時也會拒（details.reason=in_progress，' +
+    '此時該操作是否已生效未知，應稍後用相同輸入＋同一把 key 重送，不要換新 key）。',
   minLength: 16,
   maxLength: 64,
   pattern: '^[a-zA-Z0-9_-]{16,64}$'
@@ -123,16 +140,21 @@ const P_EXPECTED_UPDATED_AT = {
   description: '樂觀鎖：把讀取時拿到的 updatedAt「原始 ISO 字串」原樣帶回（例 2026-09-11T03:22:10.123456Z）。' +
     '不要轉成毫秒數字或重新格式化，會掉精度而撞出假的衝突。省略 = 不做樂觀鎖。'
 };
-// LJ-178：批量工具共用 — 工單 ID 陣列（1-100 張，逐張走與單張相同的後端路徑）
-const P_IDS = {
+// LJ-178 + GH-257 第四包：批量工具共用 — 工單清單（1-100 張）。
+// 參數名對齊 v1 契約的 tickets；元素是工單參照三形狀（UUID / 公開 key / 數字 key）。
+const P_TICKETS = {
   type: 'array',
-  description: '工單 ID 陣列（1-100 張，皆 PREFIX-NNN）。一發呼叫由伺服器內部迴圈處理全部，取代逐張單獨呼叫。',
-  items: { type: 'string', pattern: TICKET_ID_PATTERN },
+  description: '工單清單（1-' + BATCH_MAX_TICKETS + ' 張）。每個元素是工單參照：UUID、公開 key（BUG-481）或純數字 key。' +
+    '一發呼叫處理整批，逐張的成敗分別回在 succeeded[] / failed[]。',
+  items: { type: 'string', pattern: TICKET_REF_PATTERN },
   minItems: 1,
-  maxItems: 100
+  maxItems: BATCH_MAX_TICKETS
 };
-// LJ-178：批量改欄位白名單（對齊後端 batchSetField，status 請走 batchTransition）
-const ENUM_BATCH_FIELDS = ['priority', 'version', 'module', 'parentId'];
+// GH-257 第四包：批量可改的欄位 = 一般欄位 + parentId（走 batch/fields）
+// + targetVersion / foundVersion（走 batch/versions）。status 不是批次欄位，請用 batchTransition。
+const ENUM_BATCH_FIELDS = NORMAL_FIELDS.concat(['parentId', 'targetVersion', 'foundVersion']);
+// 版本欄位名 → 版本端點的參數名（單張與批次同名；差別只在單張多支援樂觀鎖）。
+const VERSION_FIELD_PARAM = { targetVersion: 'targetVersionId', foundVersion: 'foundVersionId' };
 
 // ── LJ-095 v2 + LJ-116：Tool 定義（12 個）+ LJ-178 批量（3 個）──
 const TOOL_DEFS = [
@@ -234,22 +256,34 @@ const TOOL_DEFS = [
         ticketId: '子工單參數名是 childId'
       }
     }),
-  // GH-257：replyFeedback 不是被取代的舊工具，但它也從來不是原子操作 ——
-  // 舊 GAS 後端（Code.js:3153）是「先做可選流轉，再 addComment」兩個獨立操作，中間失敗就是半套。
-  // v1 沒有等價的複合端點，下一包要補的是「client 端複合」：每個步驟各自一把穩定且互不相同的
-  // 冪等鍵，加上明確的部分成功回報（講清楚哪一步成了、哪一步沒成）。本版先本機拒絕。
+  // GH-257 第四包：replyFeedback 是 CLIENT 端複合，不是單一端點。
+  // 舊 GAS 後端（Code.js:3153）就是「先做可選流轉，再 addComment」兩個獨立操作 —— 從來不是原子的。
+  // 這裡沿用同樣的步驟順序，另外做三件舊版沒做的事：每步一把穩定且互不相同的冪等鍵、
+  // 流轉失敗就不送留言、留言失敗時如實回報「流轉已生效、留言沒送成」。
   tool('litejira.replyFeedback',
-    'Post a comment AND optionally transition ticket status. This is NOT atomic and never was: the legacy backend ran the optional transition FIRST and then added the comment — two separate operations, so a mid-way failure leaves the transition applied without the comment. For comment-only use addComment instead. NOT wired to API v1 in this version — calling it is rejected locally. It remains outstanding work: the next package implements it as a CLIENT-SIDE COMPOSITE with a distinct, stable idempotency key per step and explicit partial-success reporting (which step succeeded, which did not). It is NOT simply replaced by addComment + transitionTicket, because that leaves the caller with no defined step order and no partial-success contract.',
+    'Post a comment on a ticket, optionally preceded by a status transition. NOT ATOMIC and never was: this is a CLIENT-SIDE COMPOSITE of two v1 calls in a fixed order — (1) POST /transitions if "transition" is given, then (2) POST /comments. There is no rollback. If the transition fails the comment is NOT sent (you get the transition error). If the comment fails AFTER a successful transition you get an explicit partial-success error naming the completed step. Each step uses its own stable idempotency key derived from your idempotencyKey. Dedupe is NOT unlimited: it holds only inside the server\'s 24h idempotency retention window AND only for a byte-identical retry, so a same-key retry of the whole call re-uses the already-applied step only within that window — after it expires, or with a new key, the step really runs a second time. On an unknown outcome (5xx / network / idempotency_key_reused with details.reason=in_progress) do NOT auto-retry and do NOT mint a new key: read the current ticket state first. On details.reason=request_mismatch the payload you just sent was rejected, but the outcome of the EARLIER request under that key is not proven — inspect state and resume only the step that is genuinely missing. The transition takes an ACTION LABEL (call litejira.getTransitions first) — v1 does NOT accept a target status name. For comment-only, prefer litejira.addComment; expectedUpdatedAt is accepted ONLY together with a transition (the comment endpoint has no optimistic lock).',
     'replyFeedback', true, {
-      ticketId: P_TICKET_ID,
-      content: { type: 'string', description: '留言內容（Markdown 支援）' },
-      transition: { type: 'object', description: '可選的狀態轉換。Shape: { toStatus: string }。server 端只看 toStatus 欄。' },
+      ticketId: P_TICKET_REF,
+      content: { type: 'string', description: '留言內容（Markdown 支援）；會以 POST /tickets/{id}/comments 的 body 送出。' },
+      transition: {
+        type: 'object',
+        description: '可選的狀態流轉，會在留言「之前」執行。Shape: { action: string, reason?: string, fields?: object }。' +
+          'action 是動作標籤（先呼叫 litejira.getTransitions 取 data.actions[] 的 label）；' +
+          'v1 不收目標狀態名（toStatus / status）。退回類動作要帶 reason，送測類動作的連帶欄位放 fields。'
+      },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'content', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
-      title: '回覆反饋（含可選狀態轉換）'
+      title: '回覆反饋（可選狀態流轉＋留言，非原子）'
+    }, {
+      dispatch: 'replyFeedback',
+      removedParams: {
+        toStatus: '流轉只收動作標籤：請改帶 transition: { action: "…" }（見 litejira.getTransitions 的 data.actions[]）',
+        status: '流轉只收動作標籤：請改帶 transition: { action: "…" }',
+        body: '留言內文在本工具的參數名是 content（addComment 才是 body）'
+      }
     }),
   tool('litejira.attachLink',
     'Attach a reference URL (doc, design, external page) to a ticket via API v1 (POST /tickets/{ticketId}/attachments). Body is exactly { url, name? } — v1 attachments have no "kind" classification. Returns the created attachment; keep its "id" — that id (NOT the url) is what litejira.removeAttachment needs.',
@@ -290,19 +324,47 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.updateField',
-    'Update a single ticket field. Whitelist: title, priority, version, dueDate, startDate, description, notes, subtype, tags, mrUrl, reproSteps, expectedResult, verifyMethod, fixMethod, verifiableVersionAlpha, verifiableVersionRelease, foundVersion, module, parentId, stdLevel2, stdLevel3, releaseMethod, status, assignee, owner. For MR/PR links: field=\'mrUrl\'. Assignee (處理人) follows member validation; LJ-188/GH-249: changing assignee here also notifies old+new assignee via team Chat (same as reassignTicket, without a reason comment). GH-242: field=\'owner\'（負責人 / 最終負責人，固定，不隨狀態流轉變化）可設成員名或清空（value=null / ""）；與 assignee 處理人區分。releaseMethod（發布方式）值域受控 待定/熱更/換包/停服（送測必填非待定）. LJ-188 WELDED: field=\'status\' WITHOUT force is REJECTED (use_transitionTicket) — all normal transitions MUST go through litejira.transitionTicket (carries send-test 3-field gate 發布方式/修復方式/驗證方式 + role auto-reassign + notification). ADMIN ONLY escape hatch: pass force=true with field=\'status\' to bypass workflow path validation (LJ-153) — target must still be a defined status of the ticket\'s flow group; the audit comment is marked 「（管理者強制）」. field=\'version\' 改為不同值時必帶 reason（後端 version_reason_required 守衛，LJ-168）。',
+    'Update ONE ticket field. One tool, five v1 routes — the field decides which: (a) ordinary fields (title, priority, description, module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId) go to PATCH /tickets/{id} and take NO reason; (b) parentId goes to PUT /parent and takes a parent UUID or null; (c) assigneeId goes to PUT /assignee and REQUIRES reason; (d) targetVersion / foundVersion go to PUT /versions and take a version UUID or null (read litejira://versions — NOT the version name), with reason required by the server whenever the value actually changes; (e) status goes to the ADMIN-ONLY PUT /status and requires force=true. Renames: verifyMethod→validationMethod, owner→ownerId, assignee→assigneeId, version→targetVersion/foundVersion. "notes" has NO v1 equivalent — write it into description yourself; this tool will not move text between fields. field=status WITHOUT force=true is rejected locally: normal transitions MUST go through litejira.transitionTicket (action labels, role auto-reassign, send-test field gate). force=true only bypasses workflow PATH validation and only for admins (the server decides); the send-test required fields still apply, and force is never part of the request body. Values: null clears (including priority); tags is an array of strings; dates are YYYY-MM-DD; text fields accept "" except title.',
     'updateField', true, {
-      ticketId: P_TICKET_ID,
-      field: { type: 'string', description: 'Whitelist 欄位名（25 個合法值）', enum: ENUM_UPDATE_FIELDS },
-      value: { type: ['string', 'number', 'null'], description: '新值。型別依 field 而定：status/subtype/module 等動態值請先讀 litejira://meta；priority 用 P0-緊急/P1-高/P2-中/P3-低；releaseMethod 用 待定/熱更/換包/停服（發布方式，送測必填非待定）；null 代表清空。' },
-      force: { type: 'boolean', description: 'LJ-153 管理者強制改狀態：true 時繞過工作流路徑驗證（僅 field=status 可用、僅 admin 放行；目標仍須是該流程組已定義的狀態）。一般流轉請不要帶此參數。' },
-      reason: { type: 'string', description: 'GH-234：改 field=version 且新舊版本不同時必填（後端 version_reason_required 守衛，LJ-168），說明為何改版本；會記入工單歷程。其他欄位可省略。' },
+      ticketId: P_TICKET_REF,
+      field: {
+        type: 'string',
+        description: '要改的欄位名（v1 契約名）。一般欄位直接 PATCH；parentId / assigneeId / targetVersion / foundVersion / status 各走專屬端點。',
+        enum: ENUM_UPDATE_FIELDS
+      },
+      value: {
+        type: ['string', 'null', 'array'],
+        description: '新值（必填，要清空就明確傳 null）。型別依 field 而定：' +
+          'tags 傳字串陣列；startDate / dueDate 傳 YYYY-MM-DD；' +
+          'ownerId / assigneeId / parentId / targetVersion / foundVersion 傳 UUID（成員讀 litejira://members、版本讀 litejira://versions、父工單用其 id）；' +
+          'priority / module / subtype / releaseMethod 等受控值讀 litejira://meta；status 傳目標狀態名（僅配 force=true）。',
+        items: { type: 'string' }
+      },
+      force: {
+        type: 'boolean',
+        description: '管理者強制改狀態：只在 field=status 時可帶，且只接受 true（省略＝不強制）。' +
+          '繞過的是工作流「路徑」驗證，不是欄位必填；是否真的放行由伺服器判斷（非 admin 會被拒）。' +
+          '一般流轉請改用 litejira.transitionTicket。'
+      },
+      reason: {
+        type: 'string',
+        description: '異動原因，會記入工單歷程。field=assigneeId 時必填；' +
+          'field=targetVersion / foundVersion / status 可帶（版本值真的改變時後端會要求）。' +
+          '一般欄位的端點不收 reason，帶了會被本機擋下（不會被靜默丟掉）。'
+      },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'field', 'idempotencyKey'], {
       destructiveHint: true,
       openWorldHint: true,
-      title: '更新工單欄位'
+      title: '更新單一工單欄位'
+    }, {
+      dispatch: 'updateField',
+      legacyValues: { field: UPDATE_FIELD_LEGACY },
+      removedParams: {
+        toStatus: '目標狀態請放在 value（且 field=status、force=true）；一般流轉請改用 litejira.transitionTicket',
+        newValue: '新值的參數名是 value'
+      }
     }),
   // LJ-095 新增（5 個）
   tool('litejira.createTicket',
@@ -459,7 +521,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.getTransitions',
-    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read data.actions[] and pass an action label to litejira.transitionTicket. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels — never pass those to transitionTicket. NOTE: the BATCH variant (litejira.batchTransition) is still not available in this version.',
+    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read data.actions[] and pass an action label to litejira.transitionTicket. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels — never pass those to transitionTicket. The same labels are what litejira.batchTransition takes for a whole batch — check them against the CURRENT status of the tickets you are batching.',
     'getAllowedTransitions', false, {
       ticketId: P_TICKET_REF
     }, ['ticketId'], {
@@ -469,43 +531,85 @@ const TOOL_DEFS = [
     }, {
       v1: { action: 'getAllowedTransitions', ticketParam: 'ticketId' }
     }),
-  // LJ-178 新增（3 個）：批量操作對外化 — 一發處理 N 張，取代逐張迴圈
+  // LJ-178 + GH-257 第四包：批量操作 — 一發打一個 batch 端點（不是 client 端跑 N 次單張寫入）。
+  // 三者共通：工單清單參數名是 tickets；沒有樂觀鎖；回 { succeeded, failed } 的部分成功結果。
   tool('litejira.batchTransition',
-    'Batch status transition for MANY tickets in ONE call, by action-button label, WITH automatic role-based reassignment (same semantics as litejira.transitionTicket, applied to every id). All tickets SHOULD currently be at the same status so the action label is valid for each — call litejira.searchTickets to filter a same-status batch first. Tickets where the action is not valid (or not found) land in failed[] without aborting the rest (partial success). NO optimistic lock (batch status changes intentionally skip it to avoid concurrent-write conflicts). Returns { success:[{id,status,assignee}], failed:[{id,error}] }. 退回類動作（direction=back）須帶 reason，否則每張落 failed[]（GH-215）。',
+    'Batch status transition for MANY tickets in ONE call via API v1 (POST /tickets/batch/transitions), by ACTION LABEL, with the same workflow semantics as litejira.transitionTicket (incl. role-based auto-reassign) applied per ticket. Body is { tickets, action, reason?, fields? }: tickets is 1-100 ticket refs (UUID / BUG-481 / numeric). All tickets should currently sit at the same status, or the label will not be valid for every one of them — filter with litejira.searchTickets first. NO optimistic lock (each ticket has its own updatedAt, so one expectedUpdatedAt could not match). PARTIAL SUCCESS IS THE NORM: returns { succeeded:[{ticket,id,key,status,assignee}], failed:[{ticket,error:{code,message,details?}}] } with HTTP 200 even when some tickets failed — always read failed[] and report it; a 200 does NOT mean all tickets changed. Batch permission (can_batch) and per-ticket permissions are enforced by the server; do NOT work around a denial by looping single-ticket writes.',
     'batchTransition', true, {
-      ids: P_IDS,
-      action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對全批工單當前狀態須合法；不合法的工單落在 failed[]。合法值依當前狀態而定，請先 litejira.getTransitions 取得。' },
-      extraFields: { type: 'object', description: '連帶欄位（全批共用，不覆蓋 status/assignee）。LJ-188 送測三欄必備，缺項在此帶入：{ fixMethod: "修復方式", verifyMethod: "驗證方式", releaseMethod: "熱更/換包/停服" }。' },
-      reason: { type: 'string', description: 'GH-215：退回類動作（direction=back）必填的原因，批次共用；會記入每張工單歷程。前進類動作可省略。' },
+      tickets: P_TICKETS,
+      action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對每張工單的當前狀態各自驗證；不合法的落在 failed[]。請先用 litejira.getTransitions 取 data.actions[] 的 label。' },
+      reason: { type: 'string', description: '退回類動作必填的原因（全批共用），會記入每張工單歷程。前進類動作可省略。' },
+      fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項以 getTransitions 的回應與伺服器錯誤為準。' },
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ids', 'action', 'idempotencyKey'], {
+    }, ['tickets', 'action', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '批量流轉工單狀態（含自動轉派）'
+    }, {
+      v1: { action: 'batchTransition' },
+      removedParams: {
+        ids: '工單清單的參數名是 tickets（1-100 個工單參照：UUID / 公開 key / 數字 key）',
+        extraFields: '連帶欄位的參數名是 fields（物件）',
+        toStatus: 'v1 只收動作標籤 action；目標狀態名不對外接受',
+        status: 'v1 只收動作標籤 action（見 litejira.getTransitions 的 data.actions[]）',
+        force: '批次沒有管理者強制途徑；要強制改狀態請逐張用 litejira.updateField（field=status, force=true）',
+        expectedUpdatedAt: '批次端點不做樂觀鎖（每張工單的 updatedAt 不同，單一值對不上任何一張）'
+      }
     }),
   tool('litejira.batchReassign',
-    'Batch reassign MANY tickets to the SAME new assignee in ONE call, with a shared reason comment. Triggers a notification per ticket. Returns { success:[id], failed:[{id,error}] }. For a single ticket use litejira.reassignTicket.',
+    'Batch reassign MANY tickets to the SAME assignee in ONE call via API v1 (POST /tickets/batch/assignee). Body is { tickets, assigneeId, reason }: assigneeId is a member UUID (display names are NOT accepted — read litejira://members) and reason is REQUIRED (recorded on every ticket\'s history). PARTIAL SUCCESS IS THE NORM: returns { succeeded:[{ticket,id,key,status,assignee}], failed:[{ticket,error:{code,message,details?}}] } with HTTP 200 even when some tickets failed — always read failed[] and report it. For a single ticket use litejira.reassignTicket. Batch and per-ticket permissions are enforced by the server; do NOT loop single-ticket writes to get around a denial.',
     'batchReassign', true, {
-      ids: P_IDS,
-      newAssignee: { type: 'string', description: '新 assignee 顯示名稱（不是 email）。動態值，請先讀 litejira://members。' },
-      reason: { type: 'string', description: '轉派原因（會作為留言寫入每張工單）' },
+      tickets: P_TICKETS,
+      assigneeId: P_MEMBER_UUID('新處理人（全批共用）'),
+      reason: { type: 'string', description: '轉派原因（必填，全批共用；會記入每張工單歷程）' },
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ids', 'newAssignee', 'reason', 'idempotencyKey'], {
+    }, ['tickets', 'assigneeId', 'reason', 'idempotencyKey'], {
       idempotentHint: true,
       openWorldHint: true,
       title: '批量轉派工單'
+    }, {
+      v1: { action: 'batchReassign' },
+      removedParams: {
+        ids: '工單清單的參數名是 tickets（1-100 個工單參照：UUID / 公開 key / 數字 key）',
+        newAssignee: '改用 assigneeId（UUID）；v1 不收顯示名，請先讀 litejira://members 取 id',
+        assignee: '改用 assigneeId（UUID）；請先讀 litejira://members 取 id',
+        expectedUpdatedAt: '批次端點不做樂觀鎖'
+      }
     }),
   tool('litejira.batchSetField',
-    'Batch set ONE field to the SAME value across MANY tickets in ONE call. Whitelist: priority / version / module / parentId (NOT status — for status use litejira.batchTransition). Goes through the same updateTicket path (workflow/member validation per field). Returns { success:[id], failed:[{id,error}] }.',
+    'Batch set ONE field to the SAME value across MANY tickets in ONE call via API v1. Ordinary fields and parentId go to POST /tickets/batch/fields as { tickets, fields:{ field: value } }; targetVersion / foundVersion go to POST /tickets/batch/versions as { tickets, targetVersionId|foundVersionId, reason? } and take a version UUID or null (read litejira://versions — NOT the version name). parentId here accepts a ticket REF (UUID / BUG-481 / numeric) or null, unlike the single-ticket parent route which takes a UUID; parent/child relations are validated server-side per ticket. status is NOT a batch field — use litejira.batchTransition. NO optimistic lock. PARTIAL SUCCESS IS THE NORM: returns { succeeded:[{ticket,id,key,status,assignee}], failed:[{ticket,error:{code,message,details?}}] } with HTTP 200 even when some tickets failed — always read failed[] and report it. Batch and per-ticket permissions are enforced by the server; do NOT loop single-ticket writes to get around a denial.',
     'batchSetField', true, {
-      ids: P_IDS,
-      field: { type: 'string', description: '批量改的欄位（白名單 4 個）。status 不在此 — 改狀態請用 litejira.batchTransition。', enum: ENUM_BATCH_FIELDS },
-      value: { type: ['string', 'number', 'null'], description: '新值（全批共用）。priority 用 P0-緊急/P1-高/P2-中/P3-低；version/module 動態值請先讀 litejira://meta；parentId 為 PREFIX-NNN 或 null 解除掛載。' },
+      tickets: P_TICKETS,
+      field: {
+        type: 'string',
+        description: '批量要改的欄位（v1 契約名）。status 不在此 —— 改狀態請用 litejira.batchTransition。',
+        enum: ENUM_BATCH_FIELDS
+      },
+      value: {
+        type: ['string', 'null', 'array'],
+        description: '新值（必填，全批共用；要清空就明確傳 null）。tags 傳字串陣列；日期傳 YYYY-MM-DD；' +
+          'ownerId 傳成員 UUID；targetVersion / foundVersion 傳版本 UUID；parentId 傳工單參照（UUID / BUG-481 / 數字）或 null；' +
+          '受控值（priority / module / subtype / releaseMethod…）請先讀 litejira://meta。',
+        items: { type: 'string' }
+      },
+      reason: {
+        type: 'string',
+        description: '異動原因（全批共用），只有 field=targetVersion / foundVersion 的版本端點接受；' +
+          '版本值真的改變時後端會要求。其他欄位的批次端點不收 reason，帶了會被本機擋下。'
+      },
       idempotencyKey: P_IDEMPOTENCY
-    }, ['ids', 'field', 'idempotencyKey'], {
+    }, ['tickets', 'field', 'idempotencyKey'], {
       destructiveHint: true,
       openWorldHint: true,
       title: '批量改工單欄位'
+    }, {
+      dispatch: 'batchSetField',
+      legacyValues: { field: BATCH_FIELD_LEGACY },
+      removedParams: {
+        ids: '工單清單的參數名是 tickets（1-100 個工單參照：UUID / 公開 key / 數字 key）',
+        expectedUpdatedAt: '批次端點不做樂觀鎖',
+        force: '批次沒有管理者強制途徑；狀態也不是批次欄位'
+      }
     })
 ];
 
@@ -560,8 +664,9 @@ const RESOURCE_DEFS = [
 ];
 
 // ── LJ-095 v2：Prompt 定義（4 個）；GH-257 第二包對齊 v1 讀取流程 ──
-// 本版只有讀取工具可用（寫入端點的 v1 契約尚未接線），因此四個 prompt 一律以
-// 「彙整草稿 → 交還給使用者」收尾，不指示呼叫本版拿不到的寫入工具。
+// 四個 prompt 一律以「彙整草稿 → 使用者確認 → 才寫入」收尾。
+// 第四包起寫入工具全部可用，所以收尾語改講寫入紀律（見 WRITE_NOTE），
+// 但「先給人看過再送出」這件事不變 —— 可用不等於可以自作主張。
 const PROMPT_DEFS = [
   {
     name: 'report-bug',
@@ -597,8 +702,10 @@ const PROMPT_DEFS = [
 
 // GH-257 第二包：沒有 v1 契約列的工具一律標記 pending。
 // 用「反推」而不是逐一手寫，確保新增工具時不會漏標而悄悄掉回舊後端。
+// GH-257 第四包：18 個工具全部接線，這裡應該一個 pending 都標不出來。
+// 反推的寫法保留：日後新增工具時，忘了接線就會立刻變成明確的 TOOL_NOT_MIGRATED，而不是悄悄掉回舊後端。
 TOOL_DEFS.forEach(function (def) {
-  if (!def.v1) def.pending = true;
+  if (!def.v1 && !def.dispatch) def.pending = true;
 });
 
 // LJ-116: tool() factory v2 — 接 annotations、properties 接 short form ('string') 或 long form ({type, description, ...})
@@ -658,10 +765,7 @@ function assertMigrated_(def) {
   if (!def.pending) return;
   throw mcpError_('TOOL_NOT_MIGRATED',
     '工具「' + def.name + '」尚未接上 API v1（其 v1 端點契約未取得），本機拒絕呼叫，不會退回舊後端。' +
-    '本版可用：讀取工具（searchTickets / listComments / getActivityLog / getTransitions）、' +
-    'litejira:// 資源，以及基本寫入工具（createTicket / addComment / attachLink / removeAttachment / ' +
-    'linkTickets / reassignTicket / convertTicketType / toggleWatch / transitionTicket）。' +
-    '仍未接線的是 replyFeedback（流轉＋留言的複合操作，下一包補）、updateField 與三個 batch 工具。',
+    '本版已接線的工具見 tools/list。',
     { tool: def.name, action: def.action }, -32601);
 }
 
@@ -677,9 +781,18 @@ async function callTool(name, args, config, fetchImpl) {
   const input = validateToolInput(def, args || {});
   // Idempotency-Key 走 header，不是 body 欄位：在這裡抽出來，別讓它混進 params。
   const idempotencyKey = input.idempotencyKey;
-  const params = toV1Params_(def, input, cfg);
 
-  const outcome = await callV1Or_(def.v1.action, params, cfg, fetchImpl, idempotencyKey);
+  // GH-257 第四包：replyFeedback 是「兩發呼叫」的複合操作，回應形狀也不同（含步驟與部分成功），
+  // 所以整段自成一路，不套下面的單發流程。
+  if (def.dispatch === 'replyFeedback') {
+    return await replyFeedback_(input, cfg, fetchImpl);
+  }
+  // 其餘工具都是單發；差別只在「哪一條路由」是由參數決定（updateField / batchSetField）還是固定的。
+  const plan = def.dispatch
+    ? DISPATCHERS[def.dispatch](input)
+    : { action: def.v1.action, params: toV1Params_(def, input, cfg) };
+
+  const outcome = await callV1Or_(plan.action, plan.params, cfg, fetchImpl, idempotencyKey);
   if (outcome.isError) return outcome;
   // 契約上「204 無 body」的端點（本包只有刪附件）：沒有 data 可回。
   // 不編一個假的 { removed: true } 出來 —— 那會讓呼叫端以為伺服器真的說了什麼。
@@ -726,6 +839,348 @@ function toV1Params_(def, input, cfg) {
       { tool: def.name }, -32602);
   }
   return out;
+}
+
+// ── GH-257 第四包：依欄位分流的兩個工具 ──
+//
+// v1 沒有「萬用 update」端點：狀態 / 父子 / 處理人 / 版本各有專屬端點，各有自己的必填條件
+//（轉派的 reason 必填、改狀態要 admin 途徑）。硬做成一個端點的假象，會讓呼叫端以為
+// reason、force 這些參數到處都能帶，然後在伺服器那邊撞一堆難解的錯。
+// 所以這裡明確分流，並且對「這條路不收的參數」當面拒絕，不靜默丟掉。
+
+function hasKey_(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function badInput_(message, details) {
+  return mcpError_('VALIDATION_FAILED', message, details, -32602);
+}
+
+// value 不列進 schema 的 required：required 檢查會把合法的空字串當成缺值。
+// 但 value 確實是必填（要清空就明確傳 null），所以在這裡自己檢查「有沒有這個鍵」。
+function requireValue_(input, tool) {
+  if (!hasKey_(input, 'value')) {
+    throw badInput_('缺少必填參數：value（要清空請明確傳 null；' + tool + ' 不會把「沒帶」當成清空）',
+      { param: 'value' });
+  }
+  return input.value;
+}
+
+// 這條路不收 reason 時，當面拒絕。收下卻沒地方送＝呼叫端以為原因已記進歷程，實際上沒有。
+function rejectReason_(input, field, where) {
+  if (input.reason !== undefined) {
+    throw badInput_('field=' + field + ' 走的端點（' + where + '）不收 reason，本機拒絕以免你以為原因已記入歷程。' +
+      '需要記錄原因的是 assigneeId（必填）、targetVersion / foundVersion 與 status。',
+      { param: 'reason', field: field });
+  }
+}
+
+function rejectForce_(input, field) {
+  if (input.force !== undefined) {
+    throw badInput_('force 只能用在 field=status（管理者強制改狀態）；field=' + field + ' 不接受 force。',
+      { param: 'force', field: field });
+  }
+}
+
+const DISPATCHERS = {
+  updateField: function (input) {
+    const field = input.field;
+    const value = requireValue_(input, 'litejira.updateField');
+    const expectedUpdatedAt = input.expectedUpdatedAt;
+
+    if (field === 'status') {
+      // LJ-188：一般流轉一律走 transitionTicket —— 它才帶得動作標籤、送測欄位閘門與角色自動轉派。
+      // 沒帶 force 就在本機擋下，不代為改走別條路（猜錯會改出使用者沒要求的狀態）。
+      if (input.force !== true) {
+        throw badInput_('field=status 沒有 force=true 時一律拒絕：正常的狀態變更請改用 litejira.transitionTicket，' +
+          '先呼叫 litejira.getTransitions 取 data.actions[] 的動作標籤（它才會套用工作流的角色自動轉派與送測欄位檢查）。' +
+          'force=true 是管理者專用的例外途徑，只繞過工作流「路徑」驗證，不會放寬欄位必填，且是否放行由伺服器判斷。',
+          { param: 'force', field: field });
+      }
+      if (typeof value !== 'string' || value.trim() === '') {
+        throw badInput_('field=status 的 value 必須是目標狀態名（非空字串）', { param: 'value' });
+      }
+      // force 不進 body：它只是「走哪條路」的閘門。
+      return {
+        action: 'forceSetStatus',
+        params: { ticketId: input.ticketId, status: value, reason: input.reason, expectedUpdatedAt: expectedUpdatedAt }
+      };
+    }
+
+    rejectForce_(input, field);
+
+    if (field === 'parentId') {
+      rejectReason_(input, field, 'PUT /tickets/{childId}/parent');
+      return {
+        action: 'linkTickets',
+        params: { childId: input.ticketId, parentId: value, expectedUpdatedAt: expectedUpdatedAt }
+      };
+    }
+
+    if (field === 'assigneeId') {
+      if (value === null) {
+        throw badInput_('v1 的轉派端點不收 null：處理人不能用這條路清空（要改人請給新處理人的 UUID）。',
+          { param: 'value', field: field });
+      }
+      if (input.reason === undefined) {
+        throw badInput_('field=assigneeId 必須帶 reason（v1 的轉派把原因記進工單歷程，不是可選的客套話）。',
+          { param: 'reason', field: field });
+      }
+      return {
+        action: 'reassignTicket',
+        params: {
+          ticketId: input.ticketId, assigneeId: value,
+          reason: input.reason, expectedUpdatedAt: expectedUpdatedAt
+        }
+      };
+    }
+
+    if (hasKey_(VERSION_FIELD_PARAM, field)) {
+      const params = { ticketId: input.ticketId, reason: input.reason, expectedUpdatedAt: expectedUpdatedAt };
+      // 省略 ＝ 保持原值、null ＝ 清空：這裡一定要明確帶上這個鍵，否則等於什麼都沒改。
+      params[VERSION_FIELD_PARAM[field]] = value;
+      return { action: 'setTicketVersions', params: params };
+    }
+
+    // 一般欄位：平攤成 { [欄位]: 值 } 送 PATCH。值的形狀由傳輸層的契約表把關。
+    rejectReason_(input, field, 'PATCH /tickets/{ticket}');
+    const params = { ticket: input.ticketId, expectedUpdatedAt: expectedUpdatedAt };
+    params[field] = value;
+    return { action: 'updateTicketField', params: params };
+  },
+
+  batchSetField: function (input) {
+    const field = input.field;
+    const value = requireValue_(input, 'litejira.batchSetField');
+
+    if (hasKey_(VERSION_FIELD_PARAM, field)) {
+      const params = { tickets: input.tickets, reason: input.reason };
+      params[VERSION_FIELD_PARAM[field]] = value;
+      return { action: 'batchSetVersions', params: params };
+    }
+
+    if (input.reason !== undefined) {
+      throw badInput_('批次改欄位的端點（POST /tickets/batch/fields）不收 reason，本機拒絕以免你以為原因已記入歷程。' +
+        '只有 field=targetVersion / foundVersion 的版本端點接受 reason。',
+        { param: 'reason', field: field });
+    }
+    const fields = {};
+    fields[field] = value;
+    return { action: 'batchSetField', params: { tickets: input.tickets, fields: fields } };
+  }
+};
+
+// ── replyFeedback：client 端複合（先可選流轉、再留言）──
+//
+// 舊 GAS 後端就是這個順序的兩個獨立操作，沒有原子性也沒有 rollback。這裡照實做、照實回報：
+//   1. 流轉失敗 → 留言「不送」，回流轉的原錯誤。
+//   2. 留言失敗 → 明講「流轉已生效、留言沒送成」，附原錯誤與該步的冪等鍵，不編造 rollback。
+//   3. 每一步各自一把由 base key 推導的穩定鍵：同樣的輸入永遠得到同樣的兩把鍵（重送可被 server 去重），
+//      而兩把鍵互不相同（同一把 key 配不同 body 會被 server 判 idempotency_key_reused）。
+const REPLY_STEP_TRANSITION = 'transition';
+const REPLY_STEP_COMMENT = 'comment';
+
+// 由 base key 推導每一步的冪等鍵：sha256 → base64url（字元集正好是 [A-Za-z0-9_-]），取 43 字元（符合 16-64）。
+// 必須是純函式：重試時要能推出「同一把」鍵，才輪得到 server 去重。
+function stepKey_(baseKey, step) {
+  return crypto.createHash('sha256')
+    .update('litejira.replyFeedback/' + String(baseKey) + '/' + step)
+    .digest('base64url')
+    .slice(0, 43);
+}
+
+// idempotency_key_reused（409）有兩種成因，後端放在 error.details.reason，兩者的善後完全不同：
+//   in_progress      → 同一把 key 的「前一次請求還在跑」。這一步有沒有生效無法從這個回應判斷 = unknown。
+//   request_mismatch → 同一把 key 之前配過別的內容。這一份內容確定沒被受理（no），
+//                      但「前一次用這把 key 的操作」結果並沒有被證明，不能當成整體無副作用。
+// 其餘（後端沒給 reason / 給了沒見過的值）一律當成最保守的 unknown。
+function reuseReason_(err) {
+  if (err.code !== 'idempotency_key_reused') return null;
+  const details = err.details;
+  const reason = details !== null && typeof details === 'object' ? details.reason : undefined;
+  if (reason === 'in_progress' || reason === 'request_mismatch') return reason;
+  return 'unspecified';
+}
+
+// 單步呼叫：不拋例外，把成敗一律轉成結構化結果，好讓後續步驟決定要不要繼續、以及怎麼回報。
+async function replyStep_(step, action, params, cfg, fetchImpl, key) {
+  try {
+    const result = await callV1({
+      fetch: fetchImpl || globalThis.fetch,
+      baseUrl: cfg.apiUrl,
+      token: cfg.token,
+      action: action,
+      params: params,
+      idempotencyKey: key
+    });
+    return { ok: true, step: step, idempotencyKey: key, status: result.status, data: result.data };
+  } catch (err) {
+    if (err instanceof LiteJiraApiError) {
+      const reuse = reuseReason_(err);
+      const out = {
+        ok: false, step: step, idempotencyKey: key, kind: 'api',
+        // 5xx 是「伺服器自己壞了」，這一步到底有沒有生效無法從回應判斷；4xx 才是明確的拒絕。
+        applied: err.status >= 500 ? 'unknown' : 'no',
+        error: { code: err.code, message: err.message, status: err.status, details: err.details }
+      };
+      if (reuse !== null) {
+        out.idempotencyReuse = reuse;
+        // request_mismatch：這份內容確定沒生效，但同一把 key 的前一次操作結果未知，要單獨標出來。
+        out.applied = reuse === 'request_mismatch' ? 'no' : 'unknown';
+        out.priorAttemptApplied = 'unknown';
+      }
+      return out;
+    }
+    if (err instanceof LiteJiraTransportError) {
+      // 本機就擋下來的（invalid_argument 等）＝一發都沒送出；連線層失敗（timeout / network）則結果不明。
+      const sent = err.code === 'timeout' || err.code === 'network_error' || err.code === 'invalid_response';
+      return {
+        ok: false, step: step, idempotencyKey: key, kind: 'transport',
+        applied: sent ? 'unknown' : 'no',
+        error: { code: err.code, message: err.message, details: err.details }
+      };
+    }
+    throw err;
+  }
+}
+
+function replyTransitionParams_(input) {
+  const t = input.transition;
+  if (typeof t !== 'object' || t === null || Array.isArray(t)) {
+    throw badInput_('transition 必須是物件：{ action, reason?, fields? }', { param: 'transition' });
+  }
+  const allowed = ['action', 'reason', 'fields'];
+  Object.keys(t).forEach(function (key) {
+    if (allowed.indexOf(key) !== -1) return;
+    if (key === 'toStatus' || key === 'status') {
+      throw badInput_('transition.' + key + ' 不適用 v1：流轉只收動作標籤 action（見 litejira.getTransitions 的 data.actions[]）；' +
+        '目標狀態名是後端內部白名單，不對外接受。', { param: 'transition.' + key });
+    }
+    throw badInput_('transition 不認得的鍵：' + key + '（只收 action / reason / fields）', { param: 'transition.' + key });
+  });
+  if (typeof t.action !== 'string' || t.action.trim() === '') {
+    throw badInput_('transition.action 必須是非空的動作標籤字串', { param: 'transition.action' });
+  }
+  return {
+    ticketId: input.ticketId,
+    action: t.action,
+    reason: t.reason,
+    fields: t.fields,
+    expectedUpdatedAt: input.expectedUpdatedAt
+  };
+}
+
+async function replyFeedback_(input, cfg, fetchImpl) {
+  if (!(fetchImpl || globalThis.fetch)) {
+    throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
+  }
+  const hasTransition = input.transition !== undefined;
+  if (!hasTransition && input.expectedUpdatedAt !== undefined) {
+    // 留言端點沒有樂觀鎖，這個值無處可送。收下不用＝呼叫端以為「有人幫我擋住並行修改」。
+    throw badInput_('沒有 transition 時不接受 expectedUpdatedAt：留言端點不做樂觀鎖（新增留言不會改動工單版本），' +
+      '這個值會無處可送。要做樂觀鎖請一併給 transition，或改用 litejira.addComment。',
+      { param: 'expectedUpdatedAt' });
+  }
+
+  const baseKey = input.idempotencyKey;
+  const steps = [];
+
+  if (hasTransition) {
+    const params = replyTransitionParams_(input);
+    const key = stepKey_(baseKey, REPLY_STEP_TRANSITION);
+    const first = await replyStep_(REPLY_STEP_TRANSITION, 'transitionTicket', params, cfg, fetchImpl, key);
+    if (!first.ok) {
+      // 第一步就失敗：留言「沒有送出」，這點要講死，免得呼叫端以為留言已經在工單上。
+      return replyErrorResult_(first, [], '流轉失敗，留言未送出（步驟順序是先流轉再留言）。');
+    }
+    steps.push(publicStep_(first));
+  }
+
+  const commentKey = stepKey_(baseKey, REPLY_STEP_COMMENT);
+  const second = await replyStep_(REPLY_STEP_COMMENT, 'addComment',
+    { ticketId: input.ticketId, body: input.content }, cfg, fetchImpl, commentKey);
+  if (!second.ok) {
+    const note = hasTransition
+      ? '流轉已經生效，但未取得留言成功回應；留言是否生效請依下方結果判讀，先前流轉不會因此回滾。'
+      : '未取得留言成功回應（本次沒有流轉步驟）；是否生效請依下方結果判讀。';
+    return replyErrorResult_(second, steps, note);
+  }
+  steps.push(publicStep_(second));
+
+  const payload = {
+    ok: true,
+    ticket: input.ticketId,
+    atomic: false,
+    steps: steps
+  };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    structuredContent: payload
+  };
+}
+
+function publicStep_(step) {
+  return { step: step.step, ok: true, status: step.status, idempotencyKey: step.idempotencyKey, data: step.data };
+}
+
+// 善後指示。刻意不承諾「同一把 key 永遠可以安全重放」：
+// 伺服器的冪等紀錄只保留 24 小時，過期後同一把 key 會被當成全新請求真的再做一次。
+function replyRecovery_(failed) {
+  if (failed.idempotencyReuse === 'request_mismatch') {
+    return '伺服器回報「同一把 idempotencyKey 先前配過不同的內容」：這一次送的內容被拒絕（沒有受理），' +
+      '但「前一次用這把 key 的操作」是否已生效並沒有被證明，不能當成什麼都沒發生。' +
+      '請不要重複送同一份被拒的內容，也不要換一把新 key 把整個複合呼叫重跑一遍' +
+      '（先前的流轉可能已經生效，重跑會做第二次）。' +
+      '先讀工單當前狀態、確認哪些步驟已經完成，再針對確實還沒做的那一步，用正確的參數單獨續做。';
+  }
+  if (failed.idempotencyReuse !== undefined) {
+    // in_progress（以及後端沒指明 reason 的情況）：前一次同 key 的請求還在跑，這一步的結果未知。
+    return '伺服器回報「同一把 idempotencyKey 的前一次請求還在處理中」：這一步是否已生效目前未知。' +
+      '不要換一把新 key，也不要改動輸入（換 key 會真的再做一次，改內容會被判 request_mismatch）。' +
+      '請先讀工單當前狀態；若要重送，必須用「完全相同的輸入＋同一把 key」，' +
+      '且要在伺服器的 24 小時冪等保留期內 —— 保留期過後不要盲目重送。';
+  }
+  if (failed.applied === 'unknown') {
+    return '這一步的結果「不確定」（請求可能已送達）：不要自動重試。' +
+      '請先讀工單當前狀態確認這一步到底有沒有生效；若要重送，請在伺服器的 24 小時冪等保留期內，' +
+      '用「同一把 idempotencyKey」加上完全相同的輸入 —— 去重只在保留期內成立，過期後重送會真的再做一次。';
+  }
+  return '這一步「沒有生效」（伺服器明確拒絕，該步已回復原狀）：修正後可重送，沿用同一把 idempotencyKey。' +
+    '若必須改動內容，請保留「已完成」清單上的步驟，只補真正還沒做的那一步，不要換新 key 把整個呼叫重跑一遍。';
+}
+
+// 失敗（含部分成功）的回報。完成的步驟一律列出來，錯誤原文照抄，不重新編碼。
+function replyErrorResult_(failed, completed, note) {
+  const outcome = replyRecovery_(failed);
+  const partial = {
+    ok: false,
+    atomic: false,
+    completed: completed.map(function (s) { return s.step; }),
+    failedStep: failed.step,
+    failedStepApplied: failed.applied,
+    steps: completed
+  };
+  if (failed.idempotencyReuse !== undefined) {
+    partial.idempotencyReuse = failed.idempotencyReuse;
+    // 「這份內容沒生效」不等於「這把 key 從沒做成過任何事」，兩件事分開講。
+    partial.priorAttemptApplied = failed.priorAttemptApplied;
+  }
+  const payload = { error: failed.error, partial: partial };
+  const lines = [
+    '[' + failed.error.code + '] ' + failed.error.message,
+    failed.error.details !== undefined ? 'details: ' + JSON.stringify(failed.error.details) : '',
+    '',
+    '⚠️ 步驟「' + failed.step + '」失敗。' + note,
+    completed.length
+      ? '已完成：' + completed.map(function (s) { return s.step; }).join('、') + '（不會被還原）'
+      : '已完成：無',
+    outcome
+  ].filter(function (line) { return line !== ''; });
+  return {
+    isError: true,
+    content: [{ type: 'text', text: lines.join('\n') }],
+    structuredContent: payload
+  };
 }
 
 // 共用的 v1 呼叫 + 錯誤轉譯。回 { value } 或 MCP 的 isError 結果。
@@ -777,9 +1232,17 @@ function apiErrorResult_(err) {
 function validateToolInput(def, args) {
   const schema = def.inputSchema;
   const removed = def.removedParams || {};
+  // GH-257 第四包：不只參數「名」會改，參數「值」也會（例：field='verifyMethod' → 'validationMethod'）。
+  // 讓它撞 enum 只會回一句籠統的型別錯誤，呼叫端不知道新名字叫什麼，只好亂猜。
+  const legacyValues = def.legacyValues || {};
   const out = {};
   const errors = [];
   Object.keys(args || {}).forEach((key) => {
+    if (legacyValues[key] && typeof args[key] === 'string' &&
+      Object.prototype.hasOwnProperty.call(legacyValues[key], args[key])) {
+      errors.push(key + '=' + args[key] + ' 在 API v1 已不適用：' + legacyValues[key][args[key]]);
+      return;
+    }
     if (!schema.properties[key]) {
       // GH-257：已移除的舊參數要指路，不能只回一句 unknown，更不能默默吃掉。
       if (Object.prototype.hasOwnProperty.call(removed, key)) {
@@ -822,22 +1285,23 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           },
           serverInfo: { name: 'litejira-mcp', version: PKG_VERSION },
           // GH-265：啟動指令只保留操作安全規則，歷史背景留在規格文件，避免每個 session 重複載入。
-          // GH-257 第三包：補上基本寫入的操作紀律（冪等鍵、動作標籤、期望關注狀態、樂觀鎖字串）；
-          // 仍未接線的工具明講，免得助手繞路自創寫法。
+          // GH-257 第四包：18 個工具全部接線，原本的「未接線」那一行退場（留著會讓助手不敢用已經可用的工具）；
+          // 換上單欄更新的分流、批次的部分成功，以及 replyFeedback 非原子這三件會影響操作決策的事。
           instructions: [
             'LiteJira MCP 操作規則（API v1）：',
-            '- 寫入必帶 idempotencyKey（16-64 字元）；server 真的會去重，結果不明用同一把重送，換 key 會做第二次。',
-            '- 未接線：replyFeedback（流轉＋留言，本來就非原子）、updateField、三個 batch —— 呼叫會被拒，請改交草稿。',
-            '- 建單一次填齊：reproSteps / expectedResult / module / subtype / 日期 / tags / ownerId 都是 createTicket 正式欄位，別塞進 description 或事後補。',
-            '- 改狀態走 transitionTicket，只收動作標籤：先 getTransitions 取 data.actions[] 的 label（transitions 是狀態白名單）。退回類要帶 reason。',
-            '- toggleWatch 要帶 watching=true|false（沒有盲目切換）；刪附件用 attachmentId（UUID）不是 url。',
-            '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（掉精度會撞假衝突）。',
-            '- 工單參照可用 UUID id、公開 key（BUG-481）或純數字 key；對人講 key，要精確用 id。',
-            '- 成員條件只收 UUID：assigneeId / ownerId / creatorId（顯示名無效）；先讀 litejira://members 取 id。',
-            '- 受控值讀 litejira://meta，版本讀 litejira://versions，流轉讀 litejira://workflow/{type}；別沿用舊值域。',
-            '- 專案層級資源取 LTJ_PROJECT 或在 URI 帶 ?project=KEY；沒有就報錯，不要猜專案。',
-            '- 清單用 limit + cursor 分頁（nextCursor 當 cursor 帶回），limit 上限 100；type/status/priority 可傳陣列帶多值。',
-            '- activity 用 kind=user|system 單選過濾，不帶 kind 才是全部。'
+            '- 寫入必帶 idempotencyKey；去重僅限 24 小時保留期內＋輸入完全相同：結果不明先讀狀態，' +
+              '再用同一把 key 原輸入重送（不自動重試）；換 key 或過期都會再做一次。',
+            '- 建單一次填齊 reproSteps / expectedResult / 日期 / tags / ownerId 等正式欄位，別塞進 description。',
+            '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[] 的 label（退回類要帶 reason）。',
+            '- updateField 是單欄更新：status 要 force=true（管理者例外），assigneeId 要 reason，版本 / 父工單收 UUID。',
+            '- batch 收 tickets（1-100）；回 succeeded/failed，200 不代表全成功，務必回報 failed。',
+            '- replyFeedback 非原子：先流轉再留言，每步各一把衍生鍵；失敗如實回報部分成功。',
+            '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（會撞假衝突）。',
+            '- 工單參照可用 UUID id、公開 key（BUG-481）或數字 key；成員條件只收 UUID，先讀 litejira://members。',
+            '- 受控值讀 litejira://meta，版本讀 litejira://versions，流轉讀 litejira://workflow/{type}。',
+            '- 專案層級資源取 LTJ_PROJECT 或 URI 帶 ?project=KEY；沒有就報錯，不猜專案。',
+            '- 清單用 limit + cursor 分頁，limit 上限 100；type/status 等可傳陣列多值。',
+            '- activity 用 kind=user|system 過濾，不帶 kind 是全部。'
           ].join('\n')
         }
       };
@@ -1115,14 +1579,14 @@ async function readResource_(uri, config, fetchImpl) {
 }
 
 // ── Prompt 訊息生成 ──
-// GH-257：統一結尾語 —— 本版寫入工具尚未接上 v1 契約，呼叫會被本機拒絕。
-// prompt 直接講明，免得助手一路走到最後才撞牆、或自行編造替代寫法。
-const WRITE_PENDING_NOTE =
-  '注意：本版可用的寫入工具是 createTicket / addComment / attachLink / removeAttachment / linkTickets / ' +
-  'reassignTicket / convertTicketType / toggleWatch / transitionTicket，且需要伺服器啟用寫入（LTJ_MCP_ENABLE_WRITES）。' +
-  '留言＋狀態流轉的複合操作（replyFeedback）、單一欄位更新（updateField）與三個 batch 工具尚未接上 API v1，' +
-  '呼叫會被直接拒絕 —— 那類需求請整理成草稿交給我。' +
-  '任何寫入前先把要送出的內容給我確認，並帶上 idempotencyKey。';
+// GH-257 第四包：寫入工具已全數接上 v1，結尾語改講「寫入前的紀律」而不是「哪些還不能用」。
+// 留著舊的「尚未接上」清單會讓助手改走繞路寫法（例如把欄位塞進留言），比沒有提示更糟。
+const WRITE_NOTE =
+  '注意：寫入需要伺服器啟用（LTJ_MCP_ENABLE_WRITES），且任何寫入前先把要送出的內容給我確認，並帶上 idempotencyKey。' +
+  '改單一欄位用 litejira.updateField（改狀態除外：正常流轉一律走 litejira.transitionTicket 的動作標籤）；' +
+  '多張一起處理用 batch 系列，它們回的是 succeeded / failed 兩份清單 —— 有 failed 就要如實講出來，不要當成全部成功。' +
+  'litejira.replyFeedback 是「先流轉再留言」的兩步操作、沒有原子性，' +
+  '中途失敗我要看到哪一步成了、哪一步沒成，不要幫我補一個不存在的「已全部完成」。';
 
 // 專案子句：prompt 參數有給就明講，沒給就交代改用啟動設定。
 function projectClause_(project) {
@@ -1149,7 +1613,7 @@ function getPromptMessages_(name, args) {
             '重現步驟與預期結果請放在 reproSteps / expectedResult 這兩個獨立欄位（不要併進 description）；' +
             'module / subtype / releaseMethod / startDate / dueDate（YYYY-MM-DD）/ tags（字串陣列）/ mrUrl / ownerId / ' +
             'targetVersion / foundVersion 等欄位建單時就能一次填齊，不用建完再補；沒有值就傳 null 或整個省略。' +
-            WRITE_PENDING_NOTE
+            WRITE_NOTE
         }
       }];
     case 'weekly-status':
@@ -1178,7 +1642,7 @@ function getPromptMessages_(name, args) {
             '讀 litejira://members 取成員名冊 —— 建議負責人時請一併給出該成員的 UUID id，' +
             '因為搜尋的 assigneeId / ownerId / creatorId 只收 UUID，不收顯示名。' +
             '產出建議：優先級、負責人（名稱 + UUID）、下一個狀態。' +
-            WRITE_PENDING_NOTE
+            WRITE_NOTE
         }
       }];
     case 'close-ticket':
@@ -1192,7 +1656,7 @@ function getPromptMessages_(name, args) {
             '以回應中 data.actions[] 的 label 為準；同一份回應裡的 transitions 是目標狀態白名單，不是動作名稱，別混用。' +
             '若一步到不了結案狀態，請列出完整的中間步驟順序讓我確認；我同意後再用 litejira.transitionTicket 一步一步執行，' +
             '每一步都重新呼叫 getTransitions 取當下可用的動作標籤（退回類動作要帶 reason）。' +
-            WRITE_PENDING_NOTE
+            WRITE_NOTE
         }
       }];
     default:

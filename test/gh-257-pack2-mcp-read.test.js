@@ -292,44 +292,32 @@ test('403 底下三種互斥語意各自保留，不被狀態碼壓成同一種'
   assert.deepStrictEqual(seen, ['membership_required', 'permission_denied', 'admin_required']);
 });
 
-// ── 未升級的寫入工具：保持禁用，且不得退回舊後端 ──
+// ── 工具清單：全部接線，且沒有任何工具悄悄退回舊後端 ──
 
-// GH-257 第三包：9 個基本寫入工具接線後，tools/list 變成 4 讀 + 9 寫；
-// 仍未接線的是 replyFeedback（流轉＋留言複合，下一包）/ updateField 與三個 batch。
-test('tools/list 只公告已接線的工具：4 個讀取 + 9 個基本寫入', async function () {
+// GH-257 第四包：最後 5 個工具接線後，tools/list 是完整的 18 個（4 讀 + 14 寫）。
+// 「哪些工具可用」的權威清單改由第四包的測試逐一鎖定；這裡只鎖「不再有 pending」。
+test('tools/list 公告全部 18 個工具，沒有任何 pending 工具被藏起來', async function () {
   const names = listTools().map((t) => t.name);
-  assert.deepStrictEqual(names.sort(), [
-    'litejira.addComment',
-    'litejira.attachLink',
-    'litejira.convertTicketType',
-    'litejira.createTicket',
-    'litejira.getActivityLog',
-    'litejira.getTransitions',
-    'litejira.linkTickets',
-    'litejira.listComments',
-    'litejira.reassignTicket',
-    'litejira.removeAttachment',
-    'litejira.searchTickets',
-    'litejira.toggleWatch',
-    'litejira.transitionTicket'
-  ]);
-});
-
-test('未升級的 5 個工具一律本機拒絕，一發請求都不送（即使 enableWrites=true）', async function () {
-  const pending = [
+  assert.strictEqual(names.length, 18);
+  [
+    'litejira.searchTickets', 'litejira.listComments', 'litejira.getActivityLog', 'litejira.getTransitions',
     'litejira.replyFeedback', 'litejira.updateField',
     'litejira.batchTransition', 'litejira.batchReassign', 'litejira.batchSetField'
-  ];
-  assert.strictEqual(pending.length, 5);
+  ].forEach((name) => {
+    assert.ok(names.indexOf(name) !== -1, name + ' 應該出現在 tools/list');
+  });
+});
 
-  const fetchImpl = neverFetch();
-  for (const name of pending) {
+test('沒有工具再回 TOOL_NOT_MIGRATED（第四包後不該有未接線的工具）', async function () {
+  // 回一個一般的業務錯誤：這裡在意的只有「拒絕的理由不是『沒接線』」。
+  const fetchImpl = recorder({ error: { code: 'invalid_argument', message: '缺參數' } }, 400);
+  for (const name of listTools().map((t) => t.name)) {
+    // 故意不給必填參數：預期是參數驗證失敗（或後端裁決），而不是「工具沒接線」。
     const response = await rpc('tools/call', { name: name, arguments: {} }, cfg(), fetchImpl);
-    assert.ok(response.error, name + ' 應該失敗');
-    assert.strictEqual(response.error.data.code, 'TOOL_NOT_MIGRATED', name);
-    assert.match(response.error.message, /尚未接上 API v1/);
+    if (response.error) {
+      assert.notStrictEqual(response.error.data.code, 'TOOL_NOT_MIGRATED', name + ' 不該是未接線');
+    }
   }
-  assert.strictEqual(fetchImpl.calls.length, 0, '未升級的工具不得打出任何請求');
 });
 
 // ── Resources：6 個逐項真呼叫 ──
@@ -491,12 +479,12 @@ test('四個 prompt 逐一 prompts/get，內容對齊 v1 讀取流程且不指�
     assert.ok(!response.error, pair[0] + '：' + JSON.stringify(response.error));
     const text = response.result.messages[0].content.text;
     assert.ok(text.length > 0, pair[0] + ' 訊息不可為空');
-    // 不得指示助手呼叫本版仍拿不到的工具（第三包後只剩 updateField 與三個 batch）
-    ['updateField', 'batchTransition', 'batchReassign', 'batchSetField', 'replyFeedback']
-      .forEach(function (missingTool) {
-        assert.ok(text.indexOf('litejira.' + missingTool) === -1,
-          pair[0] + ' 不該指示呼叫未支援的 ' + missingTool);
-      });
+    // 第四包：工具全數接線，改鎖「只提得到 tools/list 裡真的存在的工具」
+    const available = listTools().map(function (t) { return t.name; });
+    (text.match(/litejira\.[A-Za-z]+/g) || []).forEach(function (mentioned) {
+      assert.ok(available.indexOf(mentioned) !== -1,
+        pair[0] + ' 提到不存在的工具 ' + mentioned);
+    });
   }
 });
 

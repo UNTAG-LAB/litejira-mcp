@@ -58,6 +58,58 @@ class LiteJiraTransportError extends Error {
   }
 }
 
+// 工單參照三形狀：UUID 主鍵 / 公開 key（BUG-481）/ 純數字 key。
+// 路徑參數本來就通用這三種；批次的 tickets[] 也是同一組形狀，故抽成常數共用。
+const TICKET_REF_PATTERN = /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z]+-\d+|\d+)$/;
+// 批次端點的上限：一發最多 100 張（契約值，不是客戶端自訂的保守值）。
+const BATCH_MAX_TICKETS = 100;
+
+// ── 第四包：可直接 PATCH 的「一般欄位」全集 ──
+// 這些欄位走 PATCH /tickets/{ticket}，body 是平攤的 { [欄位]: 值 }。
+// 不在這裡的四類各有專屬端點（狀態 / 父子 / 處理人 / 版本），硬塞進 PATCH 只會被伺服器丟掉。
+const NORMAL_FIELDS = Object.freeze([
+  'title', 'priority', 'description', 'module', 'subtype', 'releaseMethod',
+  'stdLevel2', 'stdLevel3', 'startDate', 'dueDate', 'tags', 'mrUrl',
+  'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
+  'verifiableVersionAlpha', 'verifiableVersionRelease', 'ownerId'
+]);
+const NORMAL_TEXT_FIELDS = Object.freeze([
+  'title', 'priority', 'description', 'module', 'subtype', 'releaseMethod',
+  'stdLevel2', 'stdLevel3', 'mrUrl',
+  'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
+  'verifiableVersionAlpha', 'verifiableVersionRelease'
+]);
+// 空字串是合法值（＝寫入空值）的文字欄位。
+// title 例外（後端要求非空）；priority / releaseMethod 是受控值，空字串不在值域內。
+const NORMAL_EMPTY_OK_FIELDS = Object.freeze(NORMAL_TEXT_FIELDS.filter(function (key) {
+  return key !== 'title' && key !== 'priority' && key !== 'releaseMethod';
+}));
+// null ＝ 明確清空。title 不列入：後端連空字串都不收，清掉標題不是合法操作。
+const NORMAL_NULLABLE_FIELDS = Object.freeze(NORMAL_FIELDS.filter(function (key) {
+  return key !== 'title';
+}));
+// 一般欄位的值形狀（PATCH 與批次 fields 共用同一份，避免兩邊漂移）。
+const NORMAL_FIELD_SHAPE = Object.freeze({
+  nullable: NORMAL_NULLABLE_FIELDS,
+  string: NORMAL_TEXT_FIELDS,
+  allowEmptyString: NORMAL_EMPTY_OK_FIELDS,
+  uuid: Object.freeze(['ownerId']),
+  date: Object.freeze(['startDate', 'dueDate']),
+  stringArray: Object.freeze(['tags'])
+});
+// 批次 fields 物件可放的鍵：一般欄位 + parentId。
+// parentId 在批次是「工單參照」（可用公開 key），與單張的 PUT /parent 只收 UUID 不同 —— 這是契約差異，不是筆誤。
+const BATCH_FIELD_KEYS = Object.freeze(NORMAL_FIELDS.concat(['parentId']));
+const BATCH_FIELD_SHAPE = Object.freeze({
+  nullable: Object.freeze(NORMAL_NULLABLE_FIELDS.concat(['parentId'])),
+  string: NORMAL_TEXT_FIELDS,
+  allowEmptyString: NORMAL_EMPTY_OK_FIELDS,
+  uuid: NORMAL_FIELD_SHAPE.uuid,
+  date: NORMAL_FIELD_SHAPE.date,
+  stringArray: NORMAL_FIELD_SHAPE.stringArray,
+  ticketRef: Object.freeze(['parentId'])
+});
+
 const SORT_VALUES = Object.freeze(['updatedAt', 'createdAt', 'key']);
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 const ACTIVITY_KIND_VALUES = Object.freeze(['user', 'system']);
@@ -434,9 +486,201 @@ const ACTION_MAP = Object.freeze({
       toStatus: 'v1 的流轉只收動作標籤 action；目標狀態名是後端內部白名單，不對外接受',
       status: 'v1 的流轉只收動作標籤 action（見 getTransitions 的 data.actions[].label）',
       extraFields: '連帶欄位的參數名是 fields（物件）',
-      force: 'v1 的流轉端點不收 force；繞過工作流的管理者途徑不在本端點'
+      force: 'v1 的流轉端點不收 force；繞過工作流的管理者途徑在 PUT /tickets/{ticketId}/status（forceSetStatus）'
     }),
     contractRef: 'POST /api/v1/tickets/{ticketId}/transitions'
+  }),
+
+  // ── 第四包：單一欄位更新的四條分流 + 三個批次端點 ──
+  //
+  // MCP 的 updateField 是「一個工具、五條路」：一般欄位走這條 PATCH，
+  // 父子 / 處理人 / 版本 / 狀態各自有專屬端點（各有必填的 reason 或 force 閘門）。
+  // 這裡刻意不做「一個萬用 update 端點」的假象 —— 那會讓呼叫端以為 reason 到處都能帶。
+  updateTicketField: Object.freeze({
+    method: 'PATCH',
+    pathTemplate: '/tickets/{ticket}',
+    pathParams: Object.freeze(['ticket']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(NORMAL_FIELDS.concat(['expectedUpdatedAt'])),
+      // 只帶 expectedUpdatedAt 而不帶任何欄位＝一次什麼都不改的寫入；當面擋下比送出去好。
+      atLeastOne: Object.freeze([NORMAL_FIELDS]),
+      nullable: NORMAL_FIELD_SHAPE.nullable,
+      string: NORMAL_FIELD_SHAPE.string,
+      allowEmptyString: NORMAL_FIELD_SHAPE.allowEmptyString,
+      uuid: NORMAL_FIELD_SHAPE.uuid,
+      date: NORMAL_FIELD_SHAPE.date,
+      stringArray: NORMAL_FIELD_SHAPE.stringArray,
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    rejected: Object.freeze({
+      // 收了卻沒地方放的參數：靜默丟掉會讓呼叫端以為「原因已記進歷程」。
+      reason: '一般欄位的 PATCH 不收 reason（此端點不記異動原因）。' +
+        '需要附原因的是轉派（reassignTicket，必填）、版本（setTicketVersions）與管理者改狀態（forceSetStatus）',
+      force: '一般欄位不需要也不接受 force；force 只是 field=status 的本機閘門，且不進任何 body',
+      status: '狀態不是一般欄位：正常流轉走 transitionTicket（動作標籤），管理者強制走 PUT /tickets/{ticketId}/status',
+      parentId: '父子關聯走 PUT /tickets/{childId}/parent（linkTickets），parentId 只收 UUID 或 null',
+      assigneeId: '處理人走 PUT /tickets/{ticketId}/assignee（reassignTicket），且 reason 必填',
+      assignee: '處理人改用 assigneeId，並走 PUT /tickets/{ticketId}/assignee（reason 必填）',
+      targetVersion: '目標版本走 PUT /tickets/{ticketId}/versions，參數名是 targetVersionId（UUID 或 null）',
+      foundVersion: '發現版本走 PUT /tickets/{ticketId}/versions，參數名是 foundVersionId（UUID 或 null）',
+      version: '版本在 v1 分成 targetVersionId / foundVersionId，且走 PUT /tickets/{ticketId}/versions，請明講是哪一個',
+      verifyMethod: '驗證方式在 v1 的欄位名是 validationMethod',
+      owner: '負責人的欄位名是 ownerId（UUID 或 null）',
+      // 舊白名單有 notes，v1 沒有等價欄位。悄悄丟掉＝使用者寫的字整段消失。
+      notes: 'v1 沒有 notes 欄位，也沒有等價欄位；補充說明請寫進 description（本層不代為搬運，以免蓋掉既有內容）'
+    }),
+    contractRef: 'PATCH /api/v1/tickets/{ticket}'
+  }),
+
+  // 版本設定。targetVersionId / foundVersionId 至少要帶一個；
+  // 省略 ＝ 保持原值，null ＝ 清空（兩者語意不同，不可互相代替）。
+  // reason 在「值真的有變」時是必要的，由後端裁決（本層不預判，免得擋掉合法的無變更呼叫）。
+  setTicketVersions: Object.freeze({
+    method: 'PUT',
+    pathTemplate: '/tickets/{ticketId}/versions',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['targetVersionId', 'foundVersionId', 'reason', 'expectedUpdatedAt']),
+      atLeastOne: Object.freeze([Object.freeze(['targetVersionId', 'foundVersionId'])]),
+      nullable: Object.freeze(['targetVersionId', 'foundVersionId']),
+      uuid: Object.freeze(['targetVersionId', 'foundVersionId']),
+      string: Object.freeze(['reason']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    rejected: Object.freeze({
+      targetVersion: '此端點收版本 UUID：參數名是 targetVersionId（建單時的 targetVersion 是版本「名稱」，兩者不同）',
+      foundVersion: '此端點收版本 UUID：參數名是 foundVersionId（建單時的 foundVersion 是版本「名稱」，兩者不同）',
+      version: '版本分成 targetVersionId / foundVersionId 兩個獨立欄位，請明講是哪一個'
+    }),
+    contractRef: 'PUT /api/v1/tickets/{ticketId}/versions'
+  }),
+
+  // 管理者強制改狀態。這條的閘門在呼叫端（MCP 的 force=true）與伺服器（真的是 admin 才放行），
+  // force 本身不進 body —— body 只有目標狀態名。
+  // 繞過的是「工作流路徑」驗證，不是「欄位必填」：送測三欄該填的還是要填，由伺服器裁決。
+  forceSetStatus: Object.freeze({
+    method: 'PUT',
+    pathTemplate: '/tickets/{ticketId}/status',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['status', 'reason', 'expectedUpdatedAt']),
+      required: Object.freeze(['status']),
+      string: Object.freeze(['status', 'reason']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    rejected: Object.freeze({
+      force: 'force 不是 body 欄位：它只是「要走這條管理者端點」的本機閘門，送進 body 不會有任何效果',
+      action: '此端點收的是目標狀態名 status，不是動作標籤；一般流轉請改走 transitionTicket',
+      toStatus: '目標狀態的參數名是 status',
+      fields: '此端點不收 fields；連帶欄位請走 transitionTicket，或先用 PATCH 改好一般欄位'
+    }),
+    contractRef: 'PUT /api/v1/tickets/{ticketId}/status'
+  }),
+
+  // 批次流轉。tickets 是 1-100 個工單參照（UUID / 公開 key / 數字 key 皆可）。
+  // 批次一律不做樂觀鎖：N 張各自有自己的 updatedAt，一個 expectedUpdatedAt 對不上任何一張。
+  batchTransition: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets/batch/transitions',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['tickets', 'action', 'reason', 'fields']),
+      required: Object.freeze(['tickets', 'action']),
+      refArray: Object.freeze(['tickets']),
+      string: Object.freeze(['action', 'reason']),
+      object: Object.freeze(['fields'])
+    }),
+    rejected: Object.freeze({
+      ids: '工單清單的參數名是 tickets（1-100 個工單參照）',
+      extraFields: '連帶欄位的參數名是 fields（物件）',
+      toStatus: '批次流轉一樣只收動作標籤 action；目標狀態名不對外接受',
+      status: '批次流轉只收動作標籤 action（見 getAllowedTransitions 的 data.actions[].label）',
+      force: '批次沒有管理者強制途徑；要強制改狀態請逐張走 PUT /tickets/{ticketId}/status',
+      expectedUpdatedAt: '批次端點不做樂觀鎖（每張工單的 updatedAt 各不相同，單一值對不上）；請移除'
+    }),
+    contractRef: 'POST /api/v1/tickets/batch/transitions'
+  }),
+
+  batchReassign: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets/batch/assignee',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['tickets', 'assigneeId', 'reason']),
+      required: Object.freeze(['tickets', 'assigneeId', 'reason']),
+      refArray: Object.freeze(['tickets']),
+      uuid: Object.freeze(['assigneeId']),
+      string: Object.freeze(['reason'])
+    }),
+    rejected: Object.freeze({
+      ids: '工單清單的參數名是 tickets（1-100 個工單參照）',
+      newAssignee: '改用 assigneeId（UUID）；v1 不收顯示名，請先讀 litejira://members 取 id',
+      assignee: '改用 assigneeId（UUID）；請先讀 litejira://members 取 id',
+      expectedUpdatedAt: '批次端點不做樂觀鎖；請移除'
+    }),
+    contractRef: 'POST /api/v1/tickets/batch/assignee'
+  }),
+
+  // 批次改欄位。fields 是物件，一次可帶多個一般欄位；
+  // parentId 是例外：只能單獨成批（與其他欄位同批會被伺服器拒），且收的是工單參照而非 UUID。
+  batchSetField: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets/batch/fields',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['tickets', 'fields']),
+      required: Object.freeze(['tickets', 'fields']),
+      refArray: Object.freeze(['tickets']),
+      object: Object.freeze(['fields']),
+      fieldsObject: Object.freeze({
+        key: 'fields',
+        allow: BATCH_FIELD_KEYS,
+        alone: Object.freeze(['parentId']),
+        shape: BATCH_FIELD_SHAPE
+      })
+    }),
+    rejected: Object.freeze({
+      ids: '工單清單的參數名是 tickets（1-100 個工單參照）',
+      field: '批次改欄位收的是 fields 物件：請改傳 fields: { 欄位名: 新值 }',
+      value: '批次改欄位收的是 fields 物件：請改傳 fields: { 欄位名: 新值 }',
+      status: '狀態不是批次欄位；請改用批次流轉（POST /tickets/batch/transitions）的動作標籤',
+      assigneeId: '處理人有專屬批次端點：POST /tickets/batch/assignee（reason 必填）',
+      targetVersion: '版本有專屬批次端點：POST /tickets/batch/versions，參數名是 targetVersionId（UUID）',
+      foundVersion: '版本有專屬批次端點：POST /tickets/batch/versions，參數名是 foundVersionId（UUID）',
+      version: '版本走 POST /tickets/batch/versions，並分成 targetVersionId / foundVersionId',
+      expectedUpdatedAt: '批次端點不做樂觀鎖；請移除'
+    }),
+    contractRef: 'POST /api/v1/tickets/batch/fields'
+  }),
+
+  batchSetVersions: Object.freeze({
+    method: 'POST',
+    pathTemplate: '/tickets/batch/versions',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['tickets', 'targetVersionId', 'foundVersionId', 'reason']),
+      required: Object.freeze(['tickets']),
+      atLeastOne: Object.freeze([Object.freeze(['targetVersionId', 'foundVersionId'])]),
+      refArray: Object.freeze(['tickets']),
+      nullable: Object.freeze(['targetVersionId', 'foundVersionId']),
+      uuid: Object.freeze(['targetVersionId', 'foundVersionId']),
+      string: Object.freeze(['reason'])
+    }),
+    rejected: Object.freeze({
+      ids: '工單清單的參數名是 tickets（1-100 個工單參照）',
+      targetVersion: '此端點收版本 UUID：參數名是 targetVersionId',
+      foundVersion: '此端點收版本 UUID：參數名是 foundVersionId',
+      version: '版本分成 targetVersionId / foundVersionId 兩個獨立欄位，請明講是哪一個',
+      expectedUpdatedAt: '批次端點不做樂觀鎖；請移除'
+    }),
+    contractRef: 'POST /api/v1/tickets/batch/versions'
   })
 });
 
@@ -446,17 +690,21 @@ const REPLACED_ACTIONS = Object.freeze({
   toggleWatchTicket: 'v1 改成設定期望狀態：action=setWatchState + watching=true|false（PUT / DELETE watchers/me），不再 toggle'
 });
 
-// 尚未納入的舊 action。第三包補齊了 9 個基本寫入端點，
-// 剩下的是 replyFeedback、updateField 與三個 batch —— 契約未取得前一律本機拒絕，不會退回舊後端。
-// 列在這裡是為了讓錯誤訊息能明講「缺哪一列契約」，而不是回一句籠統的 unknown。
-//
-// replyFeedback 不是被取代的舊 action，但它也不是原子操作：舊 GAS 後端（Code.js:3153）
-// 是「先做可選流轉，再 addComment」兩個獨立操作，中間失敗本來就會留下半套狀態。
-// v1 沒有等價的複合端點，下一包補的是 client 端複合：每步一把穩定且互不相同的冪等鍵，
-// 外加明確的部分成功回報。在那之前一律本機拒絕，不可當成 addComment + transitionTicket 就算了事。
-const PENDING_CONTRACT_ACTIONS = Object.freeze([
-  'replyFeedback', 'updateField', 'batchTransition', 'batchReassign', 'batchSetField'
-]);
+// 第四包起沒有「契約未取得」的 action —— 這份清單留空是事實陳述，不是佔位。
+const PENDING_CONTRACT_ACTIONS = Object.freeze([]);
+
+// 在 v1 沒有單一端點、必須由呼叫端拆成多發的舊 action。
+// 它們不是「未取得契約」，也不是「被取代」：拆法是確定的，只是拆點在 client 端。
+// 傳輸層本身只送單發，所以這裡明確拒絕並指出該拆成哪幾條路由 —— 不假裝有一個萬用端點。
+const COMPOSITE_ACTIONS = Object.freeze({
+  updateField: '「改一個欄位」在 v1 依欄位分五條路：一般欄位 PATCH /tickets/{ticket}（updateTicketField）、' +
+    '父子 PUT /tickets/{childId}/parent（linkTickets）、處理人 PUT /tickets/{ticketId}/assignee（reassignTicket，reason 必填）、' +
+    '版本 PUT /tickets/{ticketId}/versions（setTicketVersions）、管理者改狀態 PUT /tickets/{ticketId}/status（forceSetStatus）。' +
+    '請直接指定該欄位對應的 action',
+  replyFeedback: '「留言＋可選流轉」在 v1 沒有複合端點，也從來不是原子操作：' +
+    '請先送 transitionTicket（若有流轉），成功後再送 addComment，兩步各用一把互不相同的穩定冪等鍵，' +
+    '並如實回報部分成功（MCP 的 litejira.replyFeedback 已內建這個拆法）'
+});
 
 function isWriteMethod(method) {
   return WRITE_METHODS.indexOf(String(method).toUpperCase()) !== -1;
@@ -506,6 +754,11 @@ function resolveRoute(action) {
   if (has_(REPLACED_ACTIONS, action)) {
     throw new LiteJiraTransportError('replaced_action',
       'action「' + action + '」在 v1 已被取代：' + REPLACED_ACTIONS[action],
+      { action: action, mapped: Object.keys(ACTION_MAP) });
+  }
+  if (has_(COMPOSITE_ACTIONS, action)) {
+    throw new LiteJiraTransportError('composite_action',
+      'action「' + action + '」在 v1 不是單一端點：' + COMPOSITE_ACTIONS[action],
       { action: action, mapped: Object.keys(ACTION_MAP) });
   }
   if (PENDING_CONTRACT_ACTIONS.indexOf(action) !== -1) {
@@ -646,17 +899,6 @@ function buildBody(route, params) {
   }
   const allow = spec.allow || [];
   const required = spec.required || [];
-  const nullable = spec.nullable || [];
-  const uuidKeys = spec.uuid || [];
-  const uuidArrayKeys = spec.uuidArray || [];
-  const stringKeys = spec.string || [];
-  // 少數欄位後端只驗型別不驗長度，空字串是合法值；其餘字串欄位維持「非空」。
-  const emptyOkKeys = spec.allowEmptyString || [];
-  const urlKeys = spec.url || [];
-  const isoKeys = spec.isoString || [];
-  const objectKeys = spec.object || [];
-  const dateKeys = spec.date || [];
-  const stringArrayKeys = spec.stringArray || [];
   const out = {};
 
   Object.keys(params || {}).forEach((key) => {
@@ -667,68 +909,7 @@ function buildBody(route, params) {
       throw invalidArg_('參數「' + key + '」不在 v1 body 契約內（' + route.contractRef + '）',
         { param: key, allowed: allow.slice() });
     }
-    if (value === null) {
-      if (nullable.indexOf(key) === -1) {
-        throw invalidArg_('參數「' + key + '」不可為 null', { param: key });
-      }
-      out[key] = null;
-      return;
-    }
-    if (stringKeys.indexOf(key) !== -1) {
-      if (typeof value !== 'string') {
-        throw invalidArg_('參數「' + key + '」必須是字串', { param: key });
-      }
-      if (value.trim() === '' && emptyOkKeys.indexOf(key) === -1) {
-        throw invalidArg_('參數「' + key + '」必須是非空字串', { param: key });
-      }
-    }
-    if (uuidKeys.indexOf(key) !== -1 && !UUID_PATTERN.test(String(value))) {
-      throw invalidArg_('參數「' + key + '」必須是 UUID（要解除關聯請明確傳 null）', { param: key });
-    }
-    if (uuidArrayKeys.indexOf(key) !== -1) {
-      if (!Array.isArray(value)) {
-        throw invalidArg_('參數「' + key + '」必須是 UUID 陣列', { param: key });
-      }
-      value.forEach((one) => {
-        if (!UUID_PATTERN.test(String(one))) {
-          throw invalidArg_('參數「' + key + '」只收 UUID（不收顯示名）', { param: key });
-        }
-      });
-    }
-    if (urlKeys.indexOf(key) !== -1) {
-      assertHttpUrl_(key, value);
-    }
-    // 樂觀鎖時間戳：原樣回填讀取端拿到的 ISO 字串。
-    // 收 number 就代表呼叫端已經做過 Date → ms 轉換（掉微秒），那個值送出去只會撞假衝突。
-    if (isoKeys.indexOf(key) !== -1) {
-      if (typeof value === 'number') {
-        throw invalidArg_('參數「' + key + '」必須是讀取端回傳的原始 ISO 字串；' +
-          '轉成毫秒數字會掉精度並撞出假的 version_conflict', { param: key });
-      }
-      if (typeof value !== 'string' || value.trim() === '') {
-        throw invalidArg_('參數「' + key + '」必須是非空的 ISO 8601 字串（原樣回填讀取端的值）', { param: key });
-      }
-    }
-    if (objectKeys.indexOf(key) !== -1) {
-      if (typeof value !== 'object' || Array.isArray(value)) {
-        throw invalidArg_('參數「' + key + '」必須是物件', { param: key });
-      }
-    }
-    // 日期欄位：只收 YYYY-MM-DD（純日期，沒有時區）。
-    // 不接受 Date / ISO 時間戳 —— 帶時區的值換算後可能落到前後一天。
-    if (dateKeys.indexOf(key) !== -1 && !isCalendarDate_(value)) {
-      throw invalidArg_('參數「' + key + '」必須是 YYYY-MM-DD 格式的日期（不含時間與時區）', { param: key });
-    }
-    if (stringArrayKeys.indexOf(key) !== -1) {
-      if (!Array.isArray(value)) {
-        throw invalidArg_('參數「' + key + '」必須是字串陣列（要清空請傳 null）', { param: key });
-      }
-      value.forEach((one) => {
-        if (typeof one !== 'string' || one.trim() === '') {
-          throw invalidArg_('參數「' + key + '」的每個元素都必須是非空字串', { param: key });
-        }
-      });
-    }
+    checkBodyValue_(spec, key, value);
     out[key] = value;
   });
 
@@ -737,7 +918,139 @@ function buildBody(route, params) {
       throw invalidArg_('缺少必填 body 參數：' + key + '（' + route.contractRef + '）', { param: key });
     }
   });
+
+  // 「至少要帶一個」的群組（例：版本端點的 targetVersionId / foundVersionId）。
+  // 一個都不帶＝這發請求什麼也不會改；送出去只會浪費一次寫入並回一個難解的錯。
+  (spec.atLeastOne || []).forEach((group) => {
+    const given = group.filter((key) => has_(out, key));
+    if (given.length === 0) {
+      throw invalidArg_('至少要帶一個：' + group.join(' / ') +
+        '（省略＝保持原值、null＝清空，兩者語意不同）（' + route.contractRef + '）',
+        { params: group.slice() });
+    }
+  });
+
+  // 巢狀 fields 物件（批次改欄位）：鍵要在白名單內、值形狀比照單張的一般欄位。
+  const fieldsSpec = spec.fieldsObject;
+  if (fieldsSpec && has_(out, fieldsSpec.key)) {
+    checkFieldsObject_(route, fieldsSpec, out[fieldsSpec.key]);
+  }
   return out;
+}
+
+// 單一 body 值的形狀檢查。主迴圈與巢狀 fields 物件共用同一份規則，避免兩邊漂移。
+function checkBodyValue_(spec, key, value) {
+  if (value === null) {
+    if ((spec.nullable || []).indexOf(key) === -1) {
+      throw invalidArg_('參數「' + key + '」不可為 null', { param: key });
+    }
+    return;
+  }
+  if ((spec.string || []).indexOf(key) !== -1) {
+    if (typeof value !== 'string') {
+      throw invalidArg_('參數「' + key + '」必須是字串', { param: key });
+    }
+    // 少數欄位後端只驗型別不驗長度，空字串是合法值；其餘字串欄位維持「非空」。
+    if (value.trim() === '' && (spec.allowEmptyString || []).indexOf(key) === -1) {
+      throw invalidArg_('參數「' + key + '」必須是非空字串', { param: key });
+    }
+  }
+  if ((spec.uuid || []).indexOf(key) !== -1 && !UUID_PATTERN.test(String(value))) {
+    throw invalidArg_('參數「' + key + '」必須是 UUID（要解除關聯請明確傳 null）', { param: key });
+  }
+  // 工單參照：UUID / 公開 key（BUG-481）/ 純數字 key 三選一。
+  // 與「只收 UUID」的欄位刻意分開 —— 哪一邊放寬是契約差異，不是本層自由心證。
+  if ((spec.ticketRef || []).indexOf(key) !== -1) {
+    if (typeof value !== 'string' || !TICKET_REF_PATTERN.test(value)) {
+      throw invalidArg_('參數「' + key + '」必須是工單參照（UUID、公開 key 如 BUG-481，或純數字 key）', { param: key });
+    }
+  }
+  if ((spec.uuidArray || []).indexOf(key) !== -1) {
+    if (!Array.isArray(value)) {
+      throw invalidArg_('參數「' + key + '」必須是 UUID 陣列', { param: key });
+    }
+    value.forEach((one) => {
+      if (!UUID_PATTERN.test(String(one))) {
+        throw invalidArg_('參數「' + key + '」只收 UUID（不收顯示名）', { param: key });
+      }
+    });
+  }
+  // 批次的工單清單：1-100 個工單參照。上限是契約值，超過就整批被伺服器拒，不如當面擋下。
+  if ((spec.refArray || []).indexOf(key) !== -1) {
+    if (!Array.isArray(value)) {
+      throw invalidArg_('參數「' + key + '」必須是工單參照陣列', { param: key });
+    }
+    if (value.length === 0) {
+      throw invalidArg_('參數「' + key + '」至少要有 1 個工單', { param: key });
+    }
+    if (value.length > BATCH_MAX_TICKETS) {
+      throw invalidArg_('參數「' + key + '」一次最多 ' + BATCH_MAX_TICKETS + ' 個工單（收到 ' + value.length + ' 個）',
+        { param: key, max: BATCH_MAX_TICKETS, got: value.length });
+    }
+    value.forEach((one) => {
+      if (typeof one !== 'string' || !TICKET_REF_PATTERN.test(one)) {
+        throw invalidArg_('參數「' + key + '」的每個元素都必須是工單參照（UUID、公開 key 如 BUG-481，或純數字 key）',
+          { param: key });
+      }
+    });
+  }
+  if ((spec.url || []).indexOf(key) !== -1) {
+    assertHttpUrl_(key, value);
+  }
+  // 樂觀鎖時間戳：原樣回填讀取端拿到的 ISO 字串。
+  // 收 number 就代表呼叫端已經做過 Date → ms 轉換（掉微秒），那個值送出去只會撞假衝突。
+  if ((spec.isoString || []).indexOf(key) !== -1) {
+    if (typeof value === 'number') {
+      throw invalidArg_('參數「' + key + '」必須是讀取端回傳的原始 ISO 字串；' +
+        '轉成毫秒數字會掉精度並撞出假的 version_conflict', { param: key });
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw invalidArg_('參數「' + key + '」必須是非空的 ISO 8601 字串（原樣回填讀取端的值）', { param: key });
+    }
+  }
+  if ((spec.object || []).indexOf(key) !== -1) {
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw invalidArg_('參數「' + key + '」必須是物件', { param: key });
+    }
+  }
+  // 日期欄位：只收 YYYY-MM-DD（純日期，沒有時區）。
+  // 不接受 Date / ISO 時間戳 —— 帶時區的值換算後可能落到前後一天。
+  if ((spec.date || []).indexOf(key) !== -1 && !isCalendarDate_(value)) {
+    throw invalidArg_('參數「' + key + '」必須是 YYYY-MM-DD 格式的日期（不含時間與時區）', { param: key });
+  }
+  if ((spec.stringArray || []).indexOf(key) !== -1) {
+    if (!Array.isArray(value)) {
+      throw invalidArg_('參數「' + key + '」必須是字串陣列（要清空請傳 null）', { param: key });
+    }
+    value.forEach((one) => {
+      if (typeof one !== 'string' || one.trim() === '') {
+        throw invalidArg_('參數「' + key + '」的每個元素都必須是非空字串', { param: key });
+      }
+    });
+  }
+}
+
+function checkFieldsObject_(route, fieldsSpec, value) {
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined);
+  if (keys.length === 0) {
+    throw invalidArg_('參數「' + fieldsSpec.key + '」至少要帶一個欄位（空物件不會改到任何東西）',
+      { param: fieldsSpec.key, allowed: fieldsSpec.allow.slice() });
+  }
+  keys.forEach((key) => {
+    if (fieldsSpec.allow.indexOf(key) === -1) {
+      const hint = has_(route.rejected || {}, key) ? '：' + route.rejected[key] : '';
+      throw invalidArg_('欄位「' + key + '」不在批次可改欄位內（' + route.contractRef + '）' + hint,
+        { param: fieldsSpec.key + '.' + key, allowed: fieldsSpec.allow.slice() });
+    }
+    checkBodyValue_(fieldsSpec.shape, key, value[key]);
+  });
+  // 只能單獨成批的欄位（parentId）：與其他欄位混批會被伺服器整批拒，先在本機講清楚。
+  (fieldsSpec.alone || []).forEach((key) => {
+    if (keys.indexOf(key) !== -1 && keys.length > 1) {
+      throw invalidArg_('欄位「' + key + '」必須單獨成批，不能與其他欄位同批（收到：' + keys.join('、') + '）',
+        { param: fieldsSpec.key, alone: key });
+    }
+  });
 }
 
 // YYYY-MM-DD，且必須是真的存在的日期（擋掉 2026-02-30 這種格式對、日子不存在的值）。
@@ -803,7 +1116,8 @@ function buildRequest(options) {
       headers['Content-Type'] = 'application/json';
     }
     // Idempotency-Key 只走 header，永遠不進 body / query。
-    // server 端真的會去重：同一把 key 重送 = 回同一個結果；換 key 重送 = 真的做第二次。
+    // server 端真的會去重，但有效期是 24 小時的冪等保留期、且要求輸入完全相同：
+    // 保留期內同一把 key 重送 = 回同一個結果；過期或換 key 重送 = 真的做第二次。
     // 反過來，同一把 key 配不同 body 會拿到 idempotency_key_reused（409）。
     const key = opts.idempotencyKey;
     if (key === undefined || key === null || key === '') {
@@ -1037,7 +1351,11 @@ module.exports = {
   ACTIVITY_KIND_VALUES,
   API_BASE_PATH,
   API_ERROR_STATUS,
+  BATCH_FIELD_KEYS,
+  BATCH_MAX_TICKETS,
+  COMPOSITE_ACTIONS,
   DEFAULT_TIMEOUT_MS,
+  NORMAL_FIELDS,
   IDEMPOTENCY_KEY_PATTERN,
   LiteJiraApiError,
   LiteJiraTransportError,
@@ -1046,6 +1364,7 @@ module.exports = {
   REPLACED_ACTIONS,
   SORT_VALUES,
   STATS_SCOPE_VALUES,
+  TICKET_REF_PATTERN,
   UUID_PATTERN,
   buildRequest,
   callV1,

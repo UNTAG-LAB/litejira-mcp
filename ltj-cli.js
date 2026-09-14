@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // GH-257 第一包：CLI 改走對外 API v1（litejira-v1-transport）。
-// 預設就是 v1，沒有 legacy 自動 fallback；postLiteJiraApi 仍保留給尚未改線的 MCP server（下一包處理）。
+// 預設就是 v1，沒有 legacy 自動 fallback（第四包起 MCP server 也全部走 v1，沒有舊通道可退）。
 const {
   callV1,
   LiteJiraApiError,
@@ -10,7 +10,8 @@ const {
 
 // 本機拒絕（送出前就知道不合法 / 契約缺列）→ exit 2；真的打出去才失敗（網路、逾時、業務錯誤）→ exit 1。
 const LOCAL_REJECT_CODES = [
-  'unknown_action', 'unmapped_action', 'replaced_action', 'invalid_argument',
+  // composite_action＝該 action 在 v1 要拆成多發（updateField / replyFeedback），一樣是送出前就擋下。
+  'unknown_action', 'unmapped_action', 'replaced_action', 'composite_action', 'invalid_argument',
   'invalid_base_url', 'missing_token', 'idempotency_key_required', 'fetch_unavailable',
   'aborted'
 ];

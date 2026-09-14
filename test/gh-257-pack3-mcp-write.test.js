@@ -721,24 +721,23 @@ test('寫入不自動重試：後端 500 也只送一發，交由呼叫端用同
 });
 
 // replyFeedback 是「可選流轉 + 留言」的複合操作，但不是原子操作：舊後端（Code.js:3153）
-// 先做可選流轉、再 addComment，本來就是兩個操作。待辦是把它做成 client 端複合
-// （每步一把穩定且互不相同的冪等鍵 ＋ 明確的部分成功回報），不是被取代的舊工具。
-test('replyFeedback 仍是未接線的待辦（pending），不是被 addComment + transitionTicket 取代', async function () {
+// 先做可選流轉、再 addComment，本來就是兩個操作。第四包把它做成 client 端複合
+// （每步一把穩定且互不相同的冪等鍵 ＋ 明確的部分成功回報），細節見 pack4 測試。
+// 這裡守住的是「addComment 自己不會偷偷夾帶流轉」這條界線。
+test('addComment 不夾帶流轉：複合是 replyFeedback 的事，不是留言端點的事', async function () {
   const never = neverFetch();
   const response = await rpc('tools/call', {
-    name: 'litejira.replyFeedback',
-    arguments: { ticketId: 'BUG-481', content: 'x', idempotencyKey: KEY }
+    name: 'litejira.addComment',
+    arguments: { ticketId: 'BUG-481', body: 'x', transition: { action: '開始開發' }, idempotencyKey: KEY }
   }, cfg(), never);
-  assert.strictEqual(response.error.data.code, 'TOOL_NOT_MIGRATED');
-  assert.match(response.error.message, /尚未接上 API v1/);
-  // 不得再宣稱「已被取代 / 已全部完成」
-  assert.ok(!/取代/.test(response.error.message), '不得宣稱 replyFeedback 已被取代');
+  assert.strictEqual(response.error.data.code, 'VALIDATION_FAILED');
+  assert.match(response.error.message, /transitionTicket/);
   assert.strictEqual(never.calls.length, 0);
 });
 
-test('傳輸層把 replyFeedback 當「契約未取得」而不是「已被取代」', function () {
-  const { PENDING_CONTRACT_ACTIONS, REPLACED_ACTIONS } = require('../litejira-v1-transport');
-  assert.ok(PENDING_CONTRACT_ACTIONS.indexOf('replyFeedback') !== -1);
+test('傳輸層把 replyFeedback 當「必須拆成兩發的複合操作」，不是「已被取代」', function () {
+  const { COMPOSITE_ACTIONS, REPLACED_ACTIONS } = require('../litejira-v1-transport');
+  assert.ok(Object.prototype.hasOwnProperty.call(COMPOSITE_ACTIONS, 'replyFeedback'));
   assert.strictEqual(Object.prototype.hasOwnProperty.call(REPLACED_ACTIONS, 'replyFeedback'), false);
 
   assert.throws(function () {
@@ -747,7 +746,9 @@ test('傳輸層把 replyFeedback 當「契約未取得」而不是「已被取�
       params: { ticketId: 'BUG-481', content: 'x' }
     });
   }, function (err) {
-    return err instanceof LiteJiraTransportError && err.code === 'unmapped_action';
+    // 傳輸層只送單發：複合要由 MCP 那層拆成 transitionTicket + addComment 兩步。
+    return err instanceof LiteJiraTransportError && err.code === 'composite_action' &&
+      /transitionTicket/.test(err.message);
   });
 });
 
@@ -818,12 +819,16 @@ test('expectedUpdatedAt 傳毫秒數字時，傳輸層也會擋（訊息講明�
   });
 });
 
-test('replyFeedback / updateField 與三個 batch 的 v1 契約仍未取得，傳輸層維持 unmapped_action', function () {
-  ['replyFeedback', 'updateField', 'batchTransition', 'batchReassign', 'batchSetField'].forEach(function (action) {
+test('第四包後：三個 batch 有自己的路由，兩個複合 action 明確要求拆步驟', function () {
+  const { ACTION_MAP } = require('../litejira-v1-transport');
+  ['batchTransition', 'batchReassign', 'batchSetField'].forEach(function (action) {
+    assert.ok(ACTION_MAP[action], action + ' 應該有 v1 路由');
+  });
+  ['replyFeedback', 'updateField'].forEach(function (action) {
     assert.throws(function () {
       buildRequest({ baseUrl: BASE, token: TOKEN, action: action, idempotencyKey: KEY, params: {} });
     }, function (err) {
-      return err instanceof LiteJiraTransportError && err.code === 'unmapped_action';
+      return err instanceof LiteJiraTransportError && err.code === 'composite_action';
     }, action);
   });
 });

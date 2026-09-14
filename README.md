@@ -118,10 +118,12 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |
 | 啟動拋 HTTP 401 + HTML（不是 JSON） | server 端 API 部署存取設定漂移，不是你的問題 → 找 admin |
 | 多開 session 時連不上 | 改用全域安裝（`npm i -g`），不要用 npx |
-| `LiteJira API 傳輸失敗：HTTP 404`（第二段） | Google 側的間歇故障，2.12.2 起會自動重取；仍失敗就把整段錯誤訊息貼進工單，裡面已含最終網址與頁面標題 |
+| `LiteJira API 傳輸失敗：HTTP 404`（第二段） | 結果取得失敗，僅憑此訊息無法判定上游原因；請保留整段錯誤訊息，包含 requestId、最終網址與頁面標題 |
 | `code: leg2_result_unavailable` | 結果取不回來 —— 不能據此判定是你或工單沒權限 —— 見下一節 |
 
 ### 第二段取結果失敗（`leg2_result_unavailable`）
+
+2.12.3 新增結果回跳辨識與第一次失敗資訊保留。此版本修正錯誤分類，未解決間歇性結果取得失敗。
 
 呼叫分兩段跑：第一段 `POST /exec` 觸發指令碼，第二段再去取回結果。
 取結果的請求有時被 302 導回應用程式入口，也可能先回 404、重取時才發生這個導向；

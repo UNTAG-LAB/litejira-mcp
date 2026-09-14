@@ -101,7 +101,7 @@ test('GH-303：寫入在第二段失敗時，錯誤要明講「寫入可能已�
   await assert.rejects(
     () => postLiteJiraApi(fetchImpl, 'https://exec', 't', 'addComment', {}, WRITE),
     (err) => {
-      assert.match(err.message, /寫入很可能已生效/, '上層會自動重試，必須擋在訊息裡');
+      assert.match(err.message, /寫入仍可能已生效/, '上層會自動重試，必須擋在訊息裡');
       assert.equal(err.litejiraTransport.writeMayHaveApplied, true);
       return true;
     }
@@ -114,7 +114,7 @@ test('GH-303：寫入在第一段就失敗時，不得誤報「可能已生效�
     () => postLiteJiraApi(fetchImpl, 'https://exec', 't', 'addComment', {}, WRITE),
     (err) => {
       assert.equal(err.litejiraTransport.writeMayHaveApplied, false, '第一段失敗＝指令碼沒跑完，不該嚇人');
-      assert.doesNotMatch(err.message, /寫入很可能已生效/);
+      assert.doesNotMatch(err.message, /寫入仍可能已生效/);
       return true;
     }
   );
@@ -345,6 +345,153 @@ test('GH-303：寫入可能已生效時掛 transient=false，擋住呼叫端的�
   );
 });
 
+// ── 第二段導向繞回應用入口＝結果失效（GH-303 根因）────────
+
+const APP_URL = 'https://script.google.com/macros/s/AKfycb_zzz/exec';
+
+test('GH-303：第二段導向繞回應用入口 —— 零次 GET 入口、POST 只一次、不再重取同一失效網址', async () => {
+  // 實測（.scratch/trace-30s.txt）：echo 網址失效時回 302 指向 /exec，
+  // 舊版的 redirect:'follow' 就跟過去 GET 應用頁，拿到 HTTP 200 的「無權限」HTML，
+  // 被誤讀成工單權限問題；而且每輪重取都再 GET 一次應用頁。
+  for (const entry of [
+    'https://script.google.com/macros/s/AKfycb_zzz/exec',
+    'https://script.google.com/macros/s/AKfycb_zzz/dev',
+    'https://script.google.com/a/macros/example.com/s/AKfycb_zzz/exec'
+  ]) {
+    let posts = 0;
+    let echoGets = 0;
+    let entryGets = 0;
+    const fetchImpl = async (url, options) => {
+      if ((options && options.method) === 'POST') { posts++; return reply(302, '', REDIRECT); }
+      if (String(url).includes('googleusercontent')) {
+        echoGets++;
+        return reply(302, '', { location: entry, __url: REDIRECT.location });
+      }
+      entryGets++;
+      return reply(200, DENIED_HTML, { 'content-type': 'text/html' });
+    };
+
+    await assert.rejects(
+      () => postLiteJiraApi(fetchImpl, APP_URL, 't', 'searchTickets', {}, READ),
+      (err) => {
+        assert.equal(err.litejiraTransport.code, 'leg2_result_unavailable', entry + '：要判成結果取不回');
+        assert.equal(err.litejiraTransport.leg, '二');
+        assert.match(err.message, /不能據此判定是工單或帳號權限不足/, '不把網頁誤當 API 權限結論');
+        assert.doesNotMatch(err.message, /標題：LiteJira — 無權限/, '不得把應用頁標題當成失敗原因');
+        assert.ok(Array.isArray(err.litejiraTransport.redirects), '要留下可判讀的轉址資訊');
+        assert.doesNotMatch(JSON.stringify(err.litejiraTransport), /key=abc/, '轉址資訊不得夾帶查詢字串');
+        return true;
+      }
+    );
+    assert.equal(entryGets, 0, entry + '：絕不能 GET 應用入口');
+    assert.equal(echoGets, 1, entry + '：失效網址不再重取');
+    assert.equal(posts, 1, entry + '：第一段仍只送一次');
+  }
+});
+
+test('GH-303：一般服務同一網址可用 POST 與 GET 分別執行和取得結果', async () => {
+  let entryGets = 0;
+  const fetchImpl = async (url, options) => {
+    if ((options && options.method) === 'POST') return reply(302, '', REDIRECT);
+    if (String(url).includes('googleusercontent')) return reply(302, '', { location: 'https://api.example/exec' });
+    entryGets++;
+    return reply(200, JSON_OK, { 'content-type': 'application/json' });
+  };
+
+  const envelope = await postLiteJiraApi(fetchImpl, 'https://api.example/exec', 't', 'searchTickets', {}, READ);
+  assert.deepEqual(envelope, { ok: true, data: { count: 1 } });
+  assert.equal(entryGets, 1, '不可把 Google 特例套用一般服務');
+});
+
+test('GH-303：自架/代理部署 —— 同 origin 同路徑但查詢字串不同，不算導向失效', async () => {
+  // 迴歸測試：舊版只比對 origin+path，會把「路徑相同、查詢字串不同」的合法一般
+  // 服務導向也當成失效彈回應用入口而誤殺。
+  const fetchImpl = async (url, options) => {
+    if ((options && options.method) === 'POST') return reply(302, '', REDIRECT);
+    if (String(url).includes('googleusercontent')) {
+      return reply(302, '', { location: 'https://api.example/exec?other=1' });
+    }
+    return reply(200, JSON_OK, { 'content-type': 'application/json' });
+  };
+
+  const envelope = await postLiteJiraApi(fetchImpl, 'https://api.example/exec', 't', 'searchTickets', {}, READ);
+  assert.deepEqual(envelope, { ok: true, data: { count: 1 } }, '查詢字串不同不應被判成結果失效');
+});
+
+test('GH-303：第二段整段共用同一個逾時 signal，不是每一跳各自 8 秒', async () => {
+  const signals = [];
+  const fetchImpl = async (url, options) => {
+    if ((options && options.method) === 'POST') return reply(302, '', REDIRECT);
+    signals.push(options && options.signal);
+    return signals.length === 1
+      ? reply(302, '', { location: 'https://script.googleusercontent.com/macros/echo?key=hop2' })
+      : reply(200, JSON_OK, { 'content-type': 'application/json' });
+  };
+
+  const envelope = await postLiteJiraApi(fetchImpl, 'https://exec', 't', 'searchTickets', {}, READ);
+  assert.deepEqual(envelope, { ok: true, data: { count: 1 } });
+  assert.equal(signals.length, 2, '這條測試要真的跨兩跳');
+  assert.ok(signals[0], '逾時 signal 必須存在（本機 Node 版本要支援 AbortSignal.timeout）');
+  assert.strictEqual(signals[0], signals[1], '同一次取回內，每一跳必須共用同一個逾時 signal，不能每跳重新起算');
+});
+
+test('GH-303：整段逾時到期會中止（不是等滿每跳各自 8 秒），逾時後下一次重取要重新起算並可成功', async () => {
+  let hops = 0;
+  const fetchImpl = async (url, options) => {
+    if ((options && options.method) === 'POST') return reply(302, '', REDIRECT);
+    hops++;
+    if (hops === 1) {
+      // 故意拖過逾時時間，驗證這一跳真的會被同一個 signal 中止 —— 若逾時是每跳
+      // 各自重算，這裡就不會中止，測試就會在下面卡住直到手動逾時而失敗。
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 30);
+        options.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          const e = new Error('The operation was aborted due to timeout');
+          e.name = 'TimeoutError';
+          reject(e);
+        });
+      });
+      return reply(302, '', { location: 'https://script.googleusercontent.com/macros/echo?key=hop2' });
+    }
+    return reply(200, JSON_OK, { 'content-type': 'application/json' });
+  };
+
+  const envelope = await postLiteJiraApi(
+    fetchImpl, 'https://exec', 't', 'searchTickets', {},
+    { write: false, sleep: noSleep, leg2TimeoutMs: 5 }
+  );
+  assert.deepEqual(envelope, { ok: true, data: { count: 1 } });
+  assert.equal(hops, 2, '中止後要整段重取，且新一輪要有全新逾時預算才能成功');
+});
+
+test('GH-303：第二段逾時後才撞上失效導向 —— 分類看最後一次，第一次失敗要留住', async () => {
+  let gets = 0;
+  let entryGets = 0;
+  const fetchImpl = async (url, options) => {
+    if ((options && options.method) === 'POST') return reply(302, '', REDIRECT);
+    if (!String(url).includes('googleusercontent')) { entryGets++; return reply(200, DENIED_HTML, {}); }
+    gets++;
+    if (gets === 1) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
+    return reply(302, '', { location: APP_URL });
+  };
+
+  await assert.rejects(
+    () => postLiteJiraApi(fetchImpl, APP_URL, 't', 'addComment', {}, WRITE),
+    (err) => {
+      assert.equal(err.litejiraTransport.code, 'leg2_result_unavailable', '最終分類是結果失效');
+      assert.ok(err.litejiraTransport.firstFailure, '第一次失敗不得被最後一次蓋掉');
+      assert.equal(err.litejiraTransport.firstFailure.code, 'leg2_network_error');
+      assert.match(err.message, /第一次失敗/, '訊息也要看得到第一次失敗');
+      assert.match(err.message, /寫入仍可能已生效/, '寫入警告不因新分類而消失');
+      assert.equal(err.transient, false);
+      return true;
+    }
+  );
+  assert.equal(entryGets, 0, '逾時重取後撞上失效導向，一樣不得 GET 應用入口');
+  assert.equal(gets, 2, '逾時要重取，撞到失效導向後就收手');
+});
+
 // ── 逾時 ──────────────────────────────────────────────────
 
 test('GH-303：逾時落在「標頭已到、內容未讀完」時仍要重取並留下診斷', async () => {
@@ -480,6 +627,64 @@ test('GH-303：真實 fetch —— 只重取第二段，第一段的 POST 不重
     assert.deepEqual(envelope, { ok: true, data: { count: 1 } });
     assert.equal(posts, 1, '寫入動作的 POST 只能送一次');
     assert.equal(gets, 2, '第二段要重取一次');
+  } finally {
+    server.close();
+  }
+});
+
+test('GH-303：真實 fetch —— 第二段的一般合法導向照跳（不得被失效判定誤殺）', async () => {
+  // 自己接手第二段的導向後，一般 HTTP 服務的相對導向仍必須能走完，
+  // 否則等於為了擋 Google 的失效導向而砍掉正常功能。
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST') {
+      req.resume();
+      res.writeHead(302, { Location: '/echo?user_content_key=TEMPCRED_zzz' });
+      return res.end();
+    }
+    if (req.url.startsWith('/echo?')) {
+      res.writeHead(302, { Location: '/echo-final' }); // 相對路徑，且不是應用入口
+      return res.end();
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON_OK);
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const base = 'http://127.0.0.1:' + server.address().port + '/exec';
+
+  try {
+    const envelope = await postLiteJiraApi(globalThis.fetch, base, 't', 'searchTickets', {}, READ);
+    assert.deepEqual(envelope, { ok: true, data: { count: 1 } }, '第二段的合法導向要能跳到結果');
+  } finally {
+    server.close();
+  }
+});
+
+test('GH-303：真實 fetch —— 一般服務導向回同網址的 GET 結果仍可取得', async () => {
+  let posts = 0;
+  let execGets = 0;
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST') {
+      posts++;
+      req.resume();
+      res.writeHead(302, { Location: '/echo?user_content_key=TEMPCRED_zzz' });
+      return res.end();
+    }
+    if (req.url.startsWith('/echo?')) {
+      res.writeHead(302, { Location: '/exec' });
+      return res.end();
+    }
+    execGets++;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON_OK);
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const base = 'http://127.0.0.1:' + server.address().port + '/exec';
+
+  try {
+    const envelope = await postLiteJiraApi(globalThis.fetch, base, 't', 'addComment', {}, { write: true, sleep: noSleep });
+    assert.deepEqual(envelope, { ok: true, data: { count: 1 } });
+    assert.equal(execGets, 1, '一般服務同網址的 GET 必須保留');
+    assert.equal(posts, 1, 'POST 只送一次');
   } finally {
     server.close();
   }

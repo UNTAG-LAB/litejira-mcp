@@ -221,6 +221,9 @@ const DEFAULT_BUDGET_MS = 45000;
 // 設 8 秒把乾等換成早點重取。只對第二段設限 —— 中止一個純讀取沒有副作用，
 // 中止第一段則不會讓已執行的寫入復原，故第一段不設。
 const LEG2_TIMEOUT_MS = 8000;
+// 第二段的導向跳數上限。正常情況是 0 跳（echo 直接回 JSON）；
+// 給幾跳是為了不破壞一般 HTTP 服務的合法導向（相對路徑、同站搬移）。
+const LEG2_MAX_REDIRECTS = 3;
 
 // 301/302/303 依規範把 POST 轉成 GET，改用 GET 續跳不改變語意 → 當成第二段處理。
 function isRedirect_(status) {
@@ -252,6 +255,31 @@ function resolveUrl_(location, base) {
 function isSameOrigin_(a, b) {
   try {
     return new URL(a).origin === new URL(b).origin;
+  } catch (err) {
+    return false;
+  }
+}
+
+// Apps Script 的「應用程式入口」：script.google.com/macros/s/<id>/exec（或 /dev、
+// 或 Workspace 網域的 /a/macros/<domain>/s/<id>/exec）。
+// 這個網址用 POST 打是叫 doPost 執行指令碼，用 GET 打是叫 doGet 出網頁 ——
+// 兩者不是同一件事，GET 它永遠拿不到第一段算好的結果。
+function isAppsScriptAppEntry_(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== 'script.google.com') return false;
+    return /^\/(?:a\/macros\/[^/]+|macros)\/s\/[^/]+\/(?:exec|dev)$/.test(parsed.pathname);
+  } catch (err) {
+    return false;
+  }
+}
+
+// 實測 Google 的結果網址會導回應用入口，原因尚未確定。
+// 僅識別這個已驗證的 Google 路徑；一般服務可合法讓同一網址的 POST 與 GET 做不同事。
+function isResultBounceTarget_(from, next, appUrl) {
+  try {
+    return new URL(from).origin === 'https://script.googleusercontent.com' &&
+      new URL(appUrl).origin === 'https://script.google.com' && isAppsScriptAppEntry_(next);
   } catch (err) {
     return false;
   }
@@ -338,9 +366,15 @@ function summarizeBody_(text) {
   return title ? '頁面標題：' + title : '非 JSON 回應（無標題，未夾帶原始內容）';
 }
 
+// code 是給上層程式判讀用的（錯誤訊息本身是給人看的，不該被解析）
+function legTag_(leg) {
+  return leg === '一' ? 'leg1' : 'leg2';
+}
+
 function describeFailure_(response, text, leg, fallbackUrl) {
   return {
     leg,
+    code: legTag_(leg) + '_http_' + (response ? response.status : 0),
     status: response ? response.status : 0,
     contentType: headerOf_(response, 'content-type'),
     // 一律存遮蔽後的網址：這個物件的註解邀請上層記錄它，存原始字串等於請人把
@@ -355,6 +389,7 @@ function describeFailure_(response, text, leg, fallbackUrl) {
 function describeThrown_(err, leg, fallbackUrl) {
   return {
     leg,
+    code: legTag_(leg) + '_network_error',
     status: 0,
     contentType: '',
     finalUrl: redactUrl_(fallbackUrl || ''),
@@ -375,12 +410,25 @@ function transportError_(failure, requestId, attempts, isWrite) {
   const writeMayHaveApplied = Boolean(isWrite) && (info.leg === '二' || info.status === 0);
   const error = new Error(
     'LiteJira API 傳輸失敗：HTTP ' + info.status + '（第' + info.leg + '段，共嘗試 ' + attempts + ' 次）' +
+    '\n  code: ' + (info.code || '(無)') +
     '\n  requestId: ' + requestId +
     '\n  最終網址: ' + info.finalUrl +
     '\n  content-type: ' + (info.contentType || '(無)') +
     '\n  回應內容: ' + (info.body || '(空)') +
+    (info.redirects && info.redirects.length > 1 ? '\n  導向: ' + info.redirects.join(' → ') : '') +
+    (info.firstFailure
+      ? '\n  第一次失敗: HTTP ' + info.firstFailure.status +
+        '（' + (info.firstFailure.code || '無 code') + '）' + (info.firstFailure.body || '(空)')
+      : '') +
+    // 這句是給人看的：失效導向長得跟「沒有工單權限」一模一樣，不講明就會查錯方向。
+    // 但只證明「取結果被導回入口」，不知道 Google 內部原因，不能反過來宣稱權限沒問題、
+    // 也不能宣稱指令碼一定已執行完 —— 故不下結論，只描述觀察到的現象。
+    (info.code === 'leg2_result_unavailable'
+      ? '\n  ℹ️ 取結果的請求被導向繞回應用程式入口（該入口未被 GET），結果未取得 —— ' +
+        '\n     不能據此判定是工單或帳號權限不足，也無法確認 Google 端內部原因。'
+      : '') +
     (writeMayHaveApplied
-      ? '\n  ⚠️ 這是寫入動作，且失敗在取回結果的階段 —— 指令碼已執行，寫入很可能已生效。' +
+      ? '\n  ⚠️ 這是寫入動作，且失敗在取回結果的階段 —— 無法確認指令碼是否已執行，寫入仍可能已生效。' +
         '\n     重送會寫第二遍（伺服器端不對 idempotencyKey 去重）。請先查工單現況再決定。'
       : '')
   );
@@ -396,33 +444,83 @@ function transportError_(failure, requestId, attempts, isWrite) {
   return error;
 }
 
+// 第二段的單次取回：自己走導向，才能在跳去應用入口之前攔下來。
+// 導向鏈只記錄遮蔽後的 host+path（暫存結果網址的查詢字串等同臨時憑證）。
+// 逾時中止可能從 fetch 或 text() 任一處拋出，一律讓它往外拋給呼叫端統一處理。
+async function fetchLeg2Once_(fetchFn, startUrl, ctx) {
+  const chain = [redactUrl_(startUrl)];
+  let current = startUrl;
+  // 逾時是整段（起始請求 + 所有跳轉 + 讀 body）共用同一個上限，不是每一跳各自 8 秒 ——
+  // 否則 3 跳就變相把逾時放寬到 32 秒，等於沒設限。故在迴圈外建一次，所有 fetch/text() 共用。
+  const signal = timeoutSignal_(ctx.leg2TimeoutMs);
+  for (let hop = 0; ; hop++) {
+    const response = await fetchFn(current, { redirect: 'manual', signal });
+    const location = headerOf_(response, 'location');
+    const redirecting = (isRedirect_(response.status) || isMethodPreservingRedirect_(response.status)) && location;
+    if (!redirecting) {
+      // 沒有導向 → 結果（或錯誤頁）就在這裡。text() 與 fetch 同樣可能拋中止例外。
+      return { response, text: await response.text(), url: current, chain };
+    }
+    // 導向不會被消費，body 留著等下一跳；沒有下一跳的分支已經在上面呼叫 text() 讀掉了，
+    // 這裡的 response 一律有導向、不會被回傳，須主動釋放底層連線避免 undici socket 卡住。
+    if (response.body && typeof response.body.cancel === 'function') {
+      response.body.cancel().catch(function () {});
+    }
+    if (hop >= LEG2_MAX_REDIRECTS) {
+      return { stopped: true, code: 'leg2_too_many_redirects', status: response.status, url: current, chain,
+        body: '第二段導向超過 ' + LEG2_MAX_REDIRECTS + ' 跳，已停止' };
+    }
+    const next = resolveUrl_(location, current);
+    if (!next || !/^https?:$/i.test(new URL(next).protocol)) {
+      return { stopped: true, code: 'leg2_bad_redirect', status: response.status, url: current, chain,
+        body: '第二段的導向目標無法解析為合法的 http(s) 網址' };
+    }
+    if (isResultBounceTarget_(current, next, ctx.appUrl)) {
+      return { stopped: true, code: 'leg2_result_unavailable', status: response.status, url: current,
+        chain: chain.concat(redactUrl_(next)),
+        body: '取結果被導向繞回應用程式入口，結果未取得（原因不明）。GET 那個入口只會回應用網頁而非結果，故未發出該請求' };
+    }
+    chain.push(redactUrl_(next));
+    current = next;
+  }
+}
+
 // 第二段：取回暫存結果。重取只是再讀一次已算好的結果，不會再次執行指令碼，故讀寫都安全。
 async function fetchStashedResult_(fetchFn, location, ctx) {
   let failure = null;
+  let firstFailure = null;
+  const remember = (f) => { failure = f; if (!firstFailure) firstFailure = f; return f; };
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     if (attempt > 0) {
       if (Date.now() > ctx.deadline) break;
       await ctx.sleep(RETRY_DELAYS_MS[attempt - 1]);
     }
     ctx.attempts++;
-    let response;
-    let text;
+    let hop;
     try {
-      response = await fetchFn(location, { redirect: 'follow', signal: timeoutSignal_(ctx.leg2TimeoutMs) });
-      // text() 必須包在同一個 try 內：逾時可能落在「標頭已到、內容還沒讀完」，
-      // 那時中止例外從 text() 拋出。放在外面會讓它整個逃逸 —— 不重取、也沒有任何診斷。
-      text = await response.text();
+      hop = await fetchLeg2Once_(fetchFn, location, ctx);
     } catch (err) {
       // 逾時中止也走這裡：純讀取被中止沒有副作用，下一輪重取即可
-      failure = describeThrown_(err, '二', location);
+      remember(describeThrown_(err, '二', location));
       continue;
     }
-    if (response.status >= 200 && response.status < 300) {
-      const payload = parseJson_(text);
+    if (hop.stopped) {
+      remember({ leg: '二', status: hop.status, contentType: '', finalUrl: redactUrl_(hop.url),
+        body: hop.body, code: hop.code, redirects: hop.chain });
+      // 已辨識的異常導向立即停止，避免進入網頁後掩蓋原本的失敗。
+      break;
+    }
+    if (hop.response.status >= 200 && hop.response.status < 300) {
+      const payload = parseJson_(hop.text);
       if (payload !== null) return { payload };
     }
-    failure = describeFailure_(response, text, '二', location);
-    if (!isTransient_(failure.status)) break;
+    const current = remember(describeFailure_(hop.response, hop.text, '二', hop.url));
+    if (hop.chain.length > 1) current.redirects = hop.chain;
+    if (!isTransient_(current.status)) break;
+  }
+  // 最後一次失敗未必是最有診斷價值的那次（例：第一次逾時、第二次才撞上失效導向）
+  if (failure && firstFailure && failure !== firstFailure) {
+    failure.firstFailure = { status: firstFailure.status, code: firstFailure.code || '', body: firstFailure.body };
   }
   return { failure };
 }
@@ -437,6 +535,8 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
     attempts: 0,
     deadline: Date.now() + (opts.budgetMs === undefined ? DEFAULT_BUDGET_MS : opts.budgetMs),
     leg2TimeoutMs: opts.leg2TimeoutMs === undefined ? LEG2_TIMEOUT_MS : opts.leg2TimeoutMs,
+    appUrl: url, // 第二段用來辨認「導向繞回應用入口」＝結果失效
+
     sleep: opts.sleep || function (ms) { return new Promise(function (done) { setTimeout(done, ms); }); }
   };
   const init = {
@@ -470,6 +570,9 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
     if (isMethodPreservingRedirect_(response.status) && rawLocation) {
       const next = resolveUrl_(rawLocation, url);
       if (next && isSameOrigin_(next, url)) {
+        if (response.body && typeof response.body.cancel === 'function') {
+          response.body.cancel().catch(function () {});
+        }
         ctx.attempts++;
         response = await fetchFn(next, init);
         rawLocation = headerOf_(response, 'location');
@@ -495,7 +598,7 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
   const stashUrl = resolveUrl_(rawLocation, url);
   if (!stashUrl) {
     throw transportError_(
-      { leg: '一', status: response.status, contentType: headerOf_(response, 'content-type'),
+      { leg: '一', code: 'leg1_bad_redirect', status: response.status, contentType: headerOf_(response, 'content-type'),
         finalUrl: redactUrl_(url), body: '導向目標無法解析為合法網址' },
       requestId, ctx.attempts, isWrite);
   }

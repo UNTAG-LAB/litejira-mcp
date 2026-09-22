@@ -109,10 +109,19 @@ test('searchTickets 沒帶 project 時採用 LTJ_PROJECT；URI 上明給則以�
   assert.ok(b.calls[0].url.indexOf('project=OTHER') !== -1, b.calls[0].url);
   assert.ok(b.calls[0].url.indexOf('project=LTJ') === -1);
 
-  // 沒有 LTJ_PROJECT 也沒有明給 → 不猜，就是不帶這個條件（跨專案搜尋）。
-  const c = okFetch({ items: [] });
-  await callTool('litejira.searchTickets', { q: 'x' }, cfg({ project: '' }), c);
-  assert.ok(c.calls[0].url.indexOf('project=') === -1, c.calls[0].url);
+  // GH-313：沒有 LTJ_PROJECT 也沒有明給 → **本機擋下，一發都不送**。
+  // 舊版在這裡「不帶此條件」送出去並稱之為跨專案搜尋，但後端 `applyScope`（R-A15 一）
+  // 對缺專案一律回 invalid_argument：那個說法從來沒有成立過。
+  const c = neverFetch();
+  await assert.rejects(
+    () => callTool('litejira.searchTickets', { q: 'x' }, cfg({ project: '' }), c),
+    (err) => {
+      assert.strictEqual(err.code, 'PROJECT_REQUIRED');
+      assert.match(err.message, /mine/);
+      return true;
+    }
+  );
+  assert.strictEqual(c.calls.length, 0);
 });
 
 test('searchTickets 多值條件送重複 query，不做逗號串接', async function () {
@@ -121,7 +130,7 @@ test('searchTickets 多值條件送重複 query，不做逗號串接', async fun
     status: ['開發中', '待測試'],
     type: 'BUG',
     targetVersion: ['1.2.0']
-  }, cfg({ project: '' }), fetchImpl);
+  }, cfg(), fetchImpl);
 
   const query = decodeURIComponent(fetchImpl.calls[0].url.split('?')[1]);
   assert.ok(query.indexOf('status=開發中&status=待測試') !== -1, query);
@@ -134,7 +143,7 @@ test('searchTickets 成員條件只收 UUID，顯示名參數被明確拒絕並�
 
   // UUID 放行
   const ok = okFetch({ items: [] });
-  await callTool('litejira.searchTickets', { assigneeId: UUID2 }, cfg({ project: '' }), ok);
+  await callTool('litejira.searchTickets', { assigneeId: UUID2 }, cfg(), ok);
   assert.ok(ok.calls[0].url.indexOf('assigneeId=' + UUID2) !== -1);
 
   // 顯示名 → 拒絕，且訊息要指出改用哪個參數
@@ -164,16 +173,27 @@ test('searchTickets 成員條件只收 UUID，顯示名參數被明確拒絕並�
   assert.strictEqual(fetchImpl.calls.length, 0);
 });
 
-test('searchTickets 的 sort 值域換成 v1 契約（updatedAt/createdAt/key），舊的 priority 不再接受', async function () {
+test('searchTickets 的 sort 值域＝後端欄位登錄表的 15 個可排序欄位（GH-313 補齊）', async function () {
   const def = listTools().find((t) => t.name === 'litejira.searchTickets');
-  assert.deepStrictEqual(def.inputSchema.properties.sort.enum, ['updatedAt', 'createdAt', 'key']);
+  // 事實源：v2/contracts/src/ticket-fields.ts 的 `TICKET_FIELDS`（`sortable: true` 那 15 筆）。
+  assert.deepStrictEqual(def.inputSchema.properties.sort.enum, [
+    'updatedAt', 'createdAt', 'key', 'type', 'title', 'status', 'priority',
+    'assignee', 'owner', 'creator', 'module', 'targetVersion', 'foundVersion',
+    'startDate', 'dueDate'
+  ]);
 
   const fetchImpl = okFetch({ items: [] });
-  await callTool('litejira.searchTickets', { sort: 'key', order: 'asc' }, cfg({ project: '' }), fetchImpl);
+  await callTool('litejira.searchTickets', { sort: 'key', order: 'asc' }, cfg(), fetchImpl);
   assert.ok(fetchImpl.calls[0].url.indexOf('sort=key&order=asc') !== -1, fetchImpl.calls[0].url);
 
+  // priority 是契約內的可排序欄位：舊版把它擋掉是漏抄，不是契約。
+  const byPriority = okFetch({ items: [] });
+  await callTool('litejira.searchTickets', { sort: 'priority' }, cfg(), byPriority);
+  assert.ok(byPriority.calls[0].url.indexOf('sort=priority') !== -1, byPriority.calls[0].url);
+
+  // 登錄表標為不可排序的（id / tags / parent…）仍然擋下，不讓它打出伺服器會 422 的查詢。
   await assert.rejects(
-    () => callTool('litejira.searchTickets', { sort: 'priority' }, cfg(), neverFetch()),
+    () => callTool('litejira.searchTickets', { sort: 'tags' }, cfg(), neverFetch()),
     (err) => err.code === 'VALIDATION_FAILED'
   );
 });

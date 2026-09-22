@@ -110,8 +110,18 @@ const BATCH_FIELD_SHAPE = Object.freeze({
   ticketRef: Object.freeze(['parentId'])
 });
 
-const SORT_VALUES = Object.freeze(['updatedAt', 'createdAt', 'key']);
+// GH-313：可排序欄位的事實源是後端 contracts 的工單欄位登錄表（`TICKET_FIELDS` 的 `sortable` 旗標，
+// v2/contracts/src/ticket-fields.ts:29-67），推導出 15 欄。
+// 舊版只列 updatedAt / createdAt / key —— 那不是契約值，是漏抄：後果是合法的
+// `sort=priority`、`sort=dueDate` 在本機就被擋掉，呼叫端拿到「客戶端說不行」而伺服器其實收。
+const SORT_VALUES = Object.freeze([
+  'updatedAt', 'createdAt', 'key', 'type', 'title', 'status', 'priority',
+  'assignee', 'owner', 'creator', 'module', 'targetVersion', 'foundVersion',
+  'startDate', 'dueDate'
+]);
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
+// GH-313：唯一天然跨專案的篩選維度（後端 read-queries.ts 的 `MINE_DIMS`，R-A15 三）。
+const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher']);
 const ACTIVITY_KIND_VALUES = Object.freeze(['user', 'system']);
 const STATS_SCOPE_VALUES = Object.freeze(['all', 'me']);
 
@@ -146,13 +156,17 @@ const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
 //   rejected      已知「不可直接沿用舊 MCP 參數名」的映射，附指路訊息
 //   contractRef   契約出處
 const ACTION_MAP = Object.freeze({
+  // GH-313：**專案是必填的**（後端 queries/tickets.ts 的 `applyScope`，R-A15 一逐字：
+  // 「都沒帶 → 422」，不是回全部也不是回空）。唯一的跨專案入口是 `mine`（R-A15 三），
+  // 而跨專案時**一般篩選一律被拒**（R-A15 四），不是被忽略。
+  // 這三條在本機重述一次的理由與本檔一貫：送出去會拿到 422，當面擋下才講得出「該怎麼改」。
   searchTickets: Object.freeze({
     method: 'GET',
     pathTemplate: '/tickets',
     pathParams: Object.freeze([]),
     query: Object.freeze({
       allow: Object.freeze([
-        'project', 'q', 'limit', 'cursor', 'sort', 'order',
+        'project', 'mine', 'q', 'limit', 'cursor', 'sort', 'order',
         'type', 'status', 'statusGroup', 'priority', 'module', 'subtype',
         'targetVersion', 'foundVersion',
         'assigneeId', 'creatorId', 'ownerId', 'parentId'
@@ -162,8 +176,15 @@ const ACTION_MAP = Object.freeze({
         'type', 'status', 'statusGroup', 'priority', 'module', 'subtype',
         'targetVersion', 'foundVersion'
       ]),
-      enums: Object.freeze({ sort: SORT_VALUES, order: ORDER_VALUES }),
-      int: Object.freeze(['limit'])
+      enums: Object.freeze({ sort: SORT_VALUES, order: ORDER_VALUES, mine: MINE_VALUES }),
+      int: Object.freeze(['limit']),
+      // 範圍守門：沒有 project 就必須有 mine，且此時只剩排序與分頁能帶
+      //（排序與分頁不改變「框到哪些單」，故不算一般篩選——同後端 `generalFilterKeys` 的判準）。
+      scope: Object.freeze({
+        key: 'project',
+        crossProject: 'mine',
+        crossProjectAllow: Object.freeze(['mine', 'limit', 'cursor', 'sort', 'order'])
+      })
     }),
     rejected: Object.freeze({
       assignee: '成員篩選改用 assigneeId（UUID）；v1 不收顯示名，本層不從姓名猜人',
@@ -845,6 +866,24 @@ function buildQuery(route, params) {
     }
   });
 
+  // GH-313 範圍守門（工單清單）：專案必填，唯一例外是「我的」那一類的跨專案查詢，
+  // 而跨專案時不接受任何一般篩選。兩條都拒絕而不是忽略 —— 忽略會讓呼叫端拿到
+  // 「篩選沒生效」而沒有任何錯誤（本檔對靜默丟棄一貫的立場）。
+  const scope = spec.scope;
+  if (scope && present.indexOf(scope.key) === -1) {
+    if (present.indexOf(scope.crossProject) === -1) {
+      throw invalidArg_('工單查詢必須指定專案（' + scope.key + '）；要跨專案請改帶 ' + scope.crossProject +
+        '=' + MINE_VALUES.join(' | ') + '（唯一天然跨專案的維度）。本層不會替你挑一個專案。',
+        { param: scope.key, crossProject: scope.crossProject, crossProjectValues: MINE_VALUES.slice() });
+    }
+    const general = present.filter((key) => scope.crossProjectAllow.indexOf(key) === -1);
+    if (general.length > 0) {
+      throw invalidArg_('跨專案查詢（只帶 ' + scope.crossProject + '）不接受一般篩選；' +
+        '要篩選請一併指定 ' + scope.key + '（收到：' + general.join('、') + '）',
+        { param: scope.key, conflicting: general });
+    }
+  }
+
   // 互斥組：同組內給超過一個等於語意衝突，靜默取一個會回錯資料。
   (spec.exclusive || []).forEach((group) => {
     const given = group.filter((key) => present.indexOf(key) !== -1);
@@ -1359,6 +1398,7 @@ module.exports = {
   IDEMPOTENCY_KEY_PATTERN,
   LiteJiraApiError,
   LiteJiraTransportError,
+  MINE_VALUES,
   ORDER_VALUES,
   PENDING_CONTRACT_ACTIONS,
   REPLACED_ACTIONS,

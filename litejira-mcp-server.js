@@ -14,6 +14,7 @@ const {
   BATCH_MAX_TICKETS,
   LiteJiraApiError,
   LiteJiraTransportError,
+  MINE_VALUES,
   NORMAL_FIELDS,
   ORDER_VALUES,
   SORT_VALUES
@@ -40,6 +41,8 @@ const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中�
 // v1 的 sort 只有 updatedAt / createdAt / key —— 舊的 priority / dueDate 不在契約內。
 const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
+// GH-313：跨專案查詢唯一的入口（後端 MINE_DIMS）。
+const ENUM_MINE = MINE_VALUES.slice();
 // GH-257 第三包：releaseMethod 是 v1 的建單欄位，但值域由伺服器裁決 ——
 // 客戶端不寫死 enum（寫死會在後端新增值時把合法輸入擋在門外），只驗「非空字串」，受控值讀 litejira://meta。
 //
@@ -160,9 +163,20 @@ const VERSION_FIELD_PARAM = { targetVersion: 'targetVersionId', foundVersion: 'f
 const TOOL_DEFS = [
   // 既有保留（7 個）
   tool('litejira.searchTickets',
-    'Search and filter tickets via API v1 (GET /tickets). Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. Multi-value filters (type/status/statusGroup/priority/module/subtype/targetVersion/foundVersion) accept a string or an array of strings. Use litejira://ticket/{id} for one complete ticket.',
+    'Search and filter tickets via API v1 (GET /tickets). PROJECT IS MANDATORY: pass project=<KEY>, or rely on the LTJ_PROJECT startup setting; with neither the server returns invalid_argument and this tool rejects the call locally. There is NO "omit project to search everything" mode. The ONLY cross-project query is mine=assignee|creator|watcher ("my tickets"), and when you go cross-project the server accepts NO other filter (no q, no type/status/priority/…, no member ids) — add project if you need to filter. Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. Multi-value filters (type/status/statusGroup/priority/module/subtype/targetVersion/foundVersion) accept a string or an array of strings. Use litejira://ticket/{id} for one complete ticket.',
     'searchTickets', false, {
-      project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；兩者皆無則不帶此條件（跨專案搜尋）。' },
+      project: { type: 'string', description: '專案 key（必填）。省略時採用啟動環境的 LTJ_PROJECT；' +
+        '兩者皆無時本機直接擋下 —— v1 的工單查詢一定要有專案範圍，不存在「不帶就是全部」。' +
+        '真的要跨專案請改帶 mine（此時不能再帶任何其他篩選條件）。' },
+      mine: {
+        type: 'string',
+        description: '「我的」那一類：assignee=我處理的、creator=我建的、watcher=我關注的。' +
+          '這是唯一能跨專案的條件（不帶 project 時必填）。跨專案時伺服器不接受任何其他篩選；' +
+          '與 project 併用則是「那個專案裡我的那些」（縮小範圍，不放寬）。' +
+          '注意：只帶 mine 時**不會**套用 LTJ_PROJECT 預設（那會偷偷把「我的全部」收斂成一個專案）；' +
+          '要限定專案請明確帶 project。此條件需要權杖有歸屬人，bot 權杖會被伺服器拒。',
+        enum: ENUM_MINE
+      },
       q: { type: 'string', description: 'Keyword search across title + description' },
       type: P_MULTI('Filter by ticket type 工單類型。動態值，請先讀 litejira://meta'),
       status: P_MULTI('Filter by status 狀態。動態值依工單 type 而定，請先讀 litejira://workflow/{type}'),
@@ -178,14 +192,14 @@ const TOOL_DEFS = [
       parentId: { type: 'string', description: '父工單 UUID（不是公開 key）', pattern: UUID_SCHEMA_PATTERN },
       limit: P_LIMIT,
       cursor: P_CURSOR,
-      sort: { type: 'string', description: 'Sort field（v1 契約值域）', enum: ENUM_SORT },
+      sort: { type: 'string', description: 'Sort field（v1 契約值域，15 欄；預設 updatedAt）', enum: ENUM_SORT },
       order: P_ORDER
     }, [], {
       readOnlyHint: true,
       openWorldHint: true,
       title: '搜尋工單'
     }, {
-      v1: { action: 'searchTickets', defaultProject: true },
+      v1: { action: 'searchTickets', defaultProject: true, projectAlternative: 'mine' },
       // 舊參數在 v1 沒有等價語意：靜默丟掉會讓呼叫端以為有濾到，故明確拒絕並指路。
       removedParams: {
         assignee: '改用 assigneeId（UUID）；v1 不收顯示名，請先讀 litejira://members 取 id',
@@ -269,7 +283,8 @@ const TOOL_DEFS = [
         type: 'object',
         description: '可選的狀態流轉，會在留言「之前」執行。Shape: { action: string, reason?: string, fields?: object }。' +
           'action 是動作標籤（先呼叫 litejira.getTransitions 取 data.actions[] 的 label）；' +
-          'v1 不收目標狀態名（toStatus / status）。退回類動作要帶 reason，送測類動作的連帶欄位放 fields。'
+          'v1 不收目標狀態名（toStatus / status）。退回類動作與「main不受影響」要帶 reason，' +
+          '送測類動作的連帶欄位放 fields。'
       },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
@@ -499,11 +514,16 @@ const TOOL_DEFS = [
     }),
   // LJ-137 新增（2 個）：動作按鈕流轉對外化 + 查當前可用動作
   tool('litejira.transitionTicket',
-    'Perform a status transition via API v1 (POST /tickets/{ticketId}/transitions), WITH the workflow\'s automatic role-based reassignment (首次認領→操作者 / 回流→上一手開發者 / 前進→目標 role 預設人). Body is { action, reason?, fields?, expectedUpdatedAt? }. "action" is an ACTION LABEL, not a target status: call litejira.getTransitions FIRST and use a label from data.actions[] — v1 does NOT accept a target status name. Back-type actions (alpha不通過 / release不通過 / MR打回 / 退回 / 退單) require reason, or the backend rejects the call. Extra fields required by the transition (e.g. the send-to-test trio) go in "fields".',
+    'Perform a status transition via API v1 (POST /tickets/{ticketId}/transitions), WITH the workflow\'s automatic role-based reassignment (首次認領→操作者 / 回流→上一手開發者 / 前進→目標 role 預設人). Body is { action, reason?, fields?, expectedUpdatedAt? }. "action" is an ACTION LABEL, not a target status: call litejira.getTransitions FIRST and use a label from data.actions[] — v1 does NOT accept a target status name. REASON IS REQUIRED for every BACK-direction action (alpha不通過 / release不通過 / MR打回 / 退回 / 退單) AND for the one forward action「main不受影響」(the hotfix bypass — the audit trail has to say why main is unaffected); a blank reason is rejected with invalid_argument on field "reason". Extra fields required by the transition (e.g. the send-to-test trio) go in "fields".',
     'transitionTicket', true, {
       ticketId: P_TICKET_REF,
       action: { type: 'string', description: '動作標籤（如「開始開發」「送alpha測試」「alpha不通過」）。合法值依工單當前狀態而定，請先呼叫 litejira.getTransitions，取 data.actions[] 裡的標籤。' },
-      reason: { type: 'string', description: '退回類動作必填的原因，說明哪裡不通過；會記入工單歷程。前進類動作可省略。' },
+      reason: {
+        type: 'string',
+        description: '異動原因，會記入工單歷程。**所有退回類動作必填**（說明哪裡不通過），' +
+          '另外前進類的「main不受影響」也必填（要說明 main 為何不受影響，供稽核）。其餘前進類動作可省略。' +
+          '空白字串等同沒填，伺服器會回 invalid_argument（field=reason）。'
+      },
       fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項與欄位名以 getTransitions 的回應與伺服器錯誤訊息為準。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
@@ -538,7 +558,11 @@ const TOOL_DEFS = [
     'batchTransition', true, {
       tickets: P_TICKETS,
       action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對每張工單的當前狀態各自驗證；不合法的落在 failed[]。請先用 litejira.getTransitions 取 data.actions[] 的 label。' },
-      reason: { type: 'string', description: '退回類動作必填的原因（全批共用），會記入每張工單歷程。前進類動作可省略。' },
+      reason: {
+        type: 'string',
+        description: '異動原因（全批共用），會記入每張工單歷程。**所有退回類動作必填**，' +
+          '前進類的「main不受影響」也必填。其餘前進類動作可省略。沒帶時那幾張會整批落在 failed[]。'
+      },
       fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項以 getTransitions 的回應與伺服器錯誤為準。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['tickets', 'action', 'idempotencyKey'], {
@@ -817,8 +841,9 @@ async function callTool(name, args, config, fetchImpl) {
 // MCP 參數 → v1 params。MCP 端刻意沿用契約參數名，這裡只處理四件事：
 //   1. idempotencyKey 抽掉（它是 header，不是查詢 / body 欄位）
 //   2. ticketId → 該路由實際的路徑參數名（ticket / ticketId）
-//   3. project 預設值：'required' 的路由（建單）缺了就明確報錯，不猜專案；
-//      searchTickets 則是沒有就不帶條件，等於跨專案搜尋
+//   3. project 預設值：缺了一律明確報錯，不猜專案。
+//      'required'（建單）沒有替代方案；searchTickets 則接受 projectAlternative='mine'
+//      （GH-313：v1 的工單查詢專案必填，唯一的跨專案入口是「我的」那一類）
 //   4. 其餘原樣帶出 —— 不做任何改名或值域轉換，讓傳輸層的白名單是唯一守門人
 function toV1Params_(def, input, cfg) {
   const wiring = def.v1;
@@ -829,14 +854,30 @@ function toV1Params_(def, input, cfg) {
     out[wiring.ticketParam] = out.ticketId;
     if (wiring.ticketParam !== 'ticketId') delete out.ticketId;
   }
-  if (wiring.defaultProject && out.project === undefined && cfg.project) {
+  // GH-313：明確帶了跨專案維度（mine）而沒帶 project 時，**不套用 LTJ_PROJECT 預設**。
+  // 呼叫端要的是「我的全部」，偷偷收斂到某一個專案會回一份比要求更窄的清單，
+  // 而回應裡看不出少了什麼 —— 那正是本檔對靜默篩選一貫拒絕的形態。
+  // 要「某專案裡我的那些」就明講 project（契約上兩個都帶＝縮小，不放寬）。
+  const crossProject = wiring.projectAlternative !== undefined &&
+    out[wiring.projectAlternative] !== undefined;
+  if (wiring.defaultProject && out.project === undefined && cfg.project && !crossProject) {
     out.project = cfg.project;
   }
-  if (wiring.defaultProject === 'required' && out.project === undefined) {
-    throw mcpError_('PROJECT_REQUIRED',
-      '工具「' + def.name + '」需要指定專案。請在參數帶 project=<KEY>，' +
-      '或在啟動環境設定 LTJ_PROJECT=<KEY>。（不會自動選用任一專案。）',
-      { tool: def.name }, -32602);
+  // GH-313：兩種「缺專案」的處置差別只在有沒有替代方案可指路，不在於要不要報錯。
+  // 舊版讓 searchTickets 在缺專案時「不帶此條件」送出去，說法是跨專案搜尋 ——
+  // 實際上後端一律回 invalid_argument（R-A15 一），呼叫端只拿到一句伺服器錯誤，不知道該補什麼。
+  if (out.project === undefined &&
+    (wiring.defaultProject === 'required' || wiring.projectAlternative !== undefined)) {
+    const alt = wiring.projectAlternative;
+    if (alt === undefined || out[alt] === undefined) {
+      throw mcpError_('PROJECT_REQUIRED',
+        '工具「' + def.name + '」需要指定專案。請在參數帶 project=<KEY>，' +
+        '或在啟動環境設定 LTJ_PROJECT=<KEY>。（不會自動選用任一專案。）' +
+        (alt === undefined ? ''
+          : '真的要跨專案，請改帶 ' + alt + '=' + ENUM_MINE.join(' | ') +
+            '（唯一天然跨專案的維度；此時伺服器不接受任何其他篩選條件）。'),
+        { tool: def.name, crossProject: alt }, -32602);
+    }
   }
   return out;
 }
@@ -1292,7 +1333,8 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             '- 寫入必帶 idempotencyKey；去重僅限 24 小時保留期內＋輸入完全相同：結果不明先讀狀態，' +
               '再用同一把 key 原輸入重送（不自動重試）；換 key 或過期都會再做一次。',
             '- 建單一次填齊 reproSteps / expectedResult / 日期 / tags / ownerId 等正式欄位，別塞進 description。',
-            '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[] 的 label（退回類要帶 reason）。',
+            '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[] 的 label' +
+              '（退回類動作與「main不受影響」要帶 reason）。',
             '- updateField 是單欄更新：status 要 force=true（管理者例外），assigneeId 要 reason，版本 / 父工單收 UUID。',
             '- batch 收 tickets（1-100）；回 succeeded/failed，200 不代表全成功，務必回報 failed。',
             '- replyFeedback 非原子：先流轉再留言，每步各一把衍生鍵；失敗如實回報部分成功。',
@@ -1300,6 +1342,8 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             '- 工單參照可用 UUID id、公開 key（BUG-481）或數字 key；成員條件只收 UUID，先讀 litejira://members。',
             '- 受控值讀 litejira://meta，版本讀 litejira://versions，流轉讀 litejira://workflow/{type}。',
             '- 專案層級資源取 LTJ_PROJECT 或 URI 帶 ?project=KEY；沒有就報錯，不猜專案。',
+            '- searchTickets 的 project 必填（同上取 LTJ_PROJECT）；沒有「不帶就是全部」。' +
+              '唯一跨專案是 mine=assignee|creator|watcher，且跨專案時不能再帶任何其他篩選。',
             '- 清單用 limit + cursor 分頁，limit 上限 100；type/status 等可傳陣列多值。',
             '- activity 用 kind=user|system 過濾，不帶 kind 是全部。'
           ].join('\n')
@@ -1627,6 +1671,9 @@ function getPromptMessages_(name, args) {
             '再用 litejira.searchTickets 查近期更新的工單（sort=updatedAt, order=desc），' +
             '結果超過一頁就把回應的 nextCursor 當 cursor 帶回去續查。' +
             '狀態與版本條件可傳陣列一次帶多個值。' +
+            'searchTickets 一定要有專案範圍：帶 project（或靠啟動設定的 LTJ_PROJECT），' +
+            '缺了會被擋下；「不帶就是全部」不存在，只有 mine=assignee|creator|watcher 能跨專案，' +
+            '而跨專案時不能再帶任何其他篩選條件。' +
             '彙整：本週完成 / 進行中 / 新開 各 N 張，按目標版本分組列出重點。' +
             '工單請用公開 key（如 BUG-481）稱呼，需要精確參照時附上 UUID id。'
         }
@@ -1655,7 +1702,8 @@ function getPromptMessages_(name, args) {
             '再呼叫 litejira.getTransitions（ticketId=' + (ticket || '{id}') + '）取當前實際可用的動作，' +
             '以回應中 data.actions[] 的 label 為準；同一份回應裡的 transitions 是目標狀態白名單，不是動作名稱，別混用。' +
             '若一步到不了結案狀態，請列出完整的中間步驟順序讓我確認；我同意後再用 litejira.transitionTicket 一步一步執行，' +
-            '每一步都重新呼叫 getTransitions 取當下可用的動作標籤（退回類動作要帶 reason）。' +
+            '每一步都重新呼叫 getTransitions 取當下可用的動作標籤' +
+            '（退回類動作要帶 reason；前進類的「main不受影響」同樣必填 reason）。' +
             WRITE_NOTE
         }
       }];

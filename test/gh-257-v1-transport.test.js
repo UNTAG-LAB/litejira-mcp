@@ -68,16 +68,20 @@ test('searchTickets 多值條件用重複 query，不做逗號串接', function 
     baseUrl: BASE,
     token: TOKEN,
     action: 'searchTickets',
-    params: { status: ['open', 'doing'], type: ['bug'], sort: 'updatedAt', order: 'desc' }
+    params: { project: 'LTJ', status: ['open', 'doing'], type: ['bug'], sort: 'updatedAt', order: 'desc' }
   });
   assert.strictEqual(req.url,
-    BASE + '/api/v1/tickets?status=open&status=doing&type=bug&sort=updatedAt&order=desc');
+    BASE + '/api/v1/tickets?project=LTJ&status=open&status=doing&type=bug&sort=updatedAt&order=desc');
 });
 
 test('searchTickets 的 sort / order 只收契約值域，limit 只收正整數', function () {
-  [{ sort: 'title' }, { order: 'ASC' }, { limit: 0 }, { limit: 1.5 }, { limit: '-3' }].forEach(function (params) {
+  // GH-313：sort 的值域是後端欄位登錄表推導的 15 欄；`title` 是其中之一，不再是非法值。
+  [{ sort: 'nope' }, { order: 'ASC' }, { limit: 0 }, { limit: 1.5 }, { limit: '-3' }].forEach(function (params) {
     assert.throws(function () {
-      buildRequest({ baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: params });
+      buildRequest({
+        baseUrl: BASE, token: TOKEN, action: 'searchTickets',
+        params: Object.assign({ project: 'LTJ' }, params)
+      });
     }, function (err) {
       return err instanceof LiteJiraTransportError && err.code === 'invalid_argument';
     }, JSON.stringify(params));
@@ -245,30 +249,40 @@ test('base URL 已含 /api/v1 或帶尾斜線都不會重複串接', function ()
 });
 
 test('成員條件只收 UUID，顯示名被本機擋下並指路 assigneeId', function () {
-  const ok = buildRequest({ baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { assigneeId: UUID } });
-  assert.strictEqual(ok.url, BASE + '/api/v1/tickets?assigneeId=' + UUID);
+  const ok = buildRequest({
+    baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ', assigneeId: UUID }
+  });
+  assert.strictEqual(ok.url, BASE + '/api/v1/tickets?project=LTJ&assigneeId=' + UUID);
 
   assert.throws(function () {
-    buildRequest({ baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { assignee: '小明' } });
+    buildRequest({
+      baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ', assignee: '小明' }
+    });
   }, function (err) {
     return err instanceof LiteJiraTransportError && err.code === 'invalid_argument' && /assigneeId/.test(err.message);
   });
 
   assert.throws(function () {
-    buildRequest({ baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { assigneeId: 'BUG-481' } });
+    buildRequest({
+      baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ', assigneeId: 'BUG-481' }
+    });
   }, function (err) {
     return err instanceof LiteJiraTransportError && err.code === 'invalid_argument';
   });
 
   // parentId 也是 UUID，不收工單 key
   assert.throws(function () {
-    buildRequest({ baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { parentId: 'EPIC-9' } });
+    buildRequest({
+      baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ', parentId: 'EPIC-9' }
+    });
   }, function (err) { return err.code === 'invalid_argument'; });
 });
 
 test('契約未確認的 query 參數本機拒絕，不打出不存在的查詢', function () {
   assert.throws(function () {
-    buildRequest({ baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { labels: 'crash' } });
+    buildRequest({
+      baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ', labels: 'crash' }
+    });
   }, function (err) {
     return err instanceof LiteJiraTransportError && err.code === 'invalid_argument' && /尚未在 v1 契約中確認/.test(err.message);
   });
@@ -317,7 +331,7 @@ test('http 只放行明確 loopback，其餘協定 / 外站 http / 帶帳密一�
 test('2xx 只接受 { data } 信封，並且只拆一層（不會出現 data.data）', async function () {
   const data = { items: [{ id: 'u-1', key: 'BUG-481', title: 't', assignee: null }], nextCursor: null };
   const result = await callV1({
-    fetch: jsonResponse(200, { data: data }), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}
+    fetch: jsonResponse(200, { data: data }), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }
   });
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.status, 200);
@@ -336,7 +350,7 @@ test('2xx 缺 data / null / 空 body / HTML 一律 invalid_response，不無條�
   ];
   for (const [status, payload] of bad) {
     await assert.rejects(
-      callV1({ fetch: jsonResponse(status, payload), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {} }),
+      callV1({ fetch: jsonResponse(status, payload), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' } }),
       function (err) {
         return err instanceof LiteJiraTransportError && err.code === 'invalid_response';
       },
@@ -369,7 +383,7 @@ test('錯誤狀態原樣保存 error.code / message / details，不做狀態碼�
     }
   };
   await assert.rejects(
-    callV1({ fetch: jsonResponse(409, payload), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {} }),
+    callV1({ fetch: jsonResponse(409, payload), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' } }),
     function (err) {
       return err instanceof LiteJiraApiError &&
         err.status === 409 &&
@@ -386,7 +400,7 @@ test('403 三種語意各自保留 code，不被收斂成「管理限定」', as
     await assert.rejects(
       callV1({
         fetch: jsonResponse(403, { error: { code: code, message: 'nope' } }),
-        baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}
+        baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }
       }),
       function (err) { return err.code === code && err.status === 403; }
     );
@@ -398,7 +412,7 @@ test('5xx 不自動重試：fetch 只被呼叫一次', async function () {
   const calls = [];
   await assert.rejects(callV1({
     fetch: jsonResponse(500, { error: { code: 'internal', message: 'boom' } }, calls),
-    baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}
+    baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }
   }));
   assert.strictEqual(calls.length, 1);
 });
@@ -415,7 +429,7 @@ test('回應含假 token 時，錯誤訊息不外洩 body 片段（任何狀態�
   for (const status of [200, 500]) {
     for (const body of bodies) {
       await assert.rejects(
-        callV1({ fetch: jsonResponse(status, body), baseUrl: BASE, token: secret, action: 'searchTickets', params: {} }),
+        callV1({ fetch: jsonResponse(status, body), baseUrl: BASE, token: secret, action: 'searchTickets', params: { project: 'LTJ' } }),
         function (err) {
           const dump = String(err.message) + JSON.stringify(err.details || {});
           return err instanceof LiteJiraTransportError &&
@@ -435,7 +449,7 @@ test('網路錯誤不轉述 err.message（原訊息可能夾帶憑證或 URL）'
     return Promise.reject(new Error('connect ECONNREFUSED https://x/?token=' + secret));
   };
   await assert.rejects(
-    callV1({ fetch: failing, baseUrl: BASE, token: secret, action: 'searchTickets', params: {} }),
+    callV1({ fetch: failing, baseUrl: BASE, token: secret, action: 'searchTickets', params: { project: 'LTJ' } }),
     function (err) {
       const dump = String(err.message) + JSON.stringify(err.details || {});
       return err instanceof LiteJiraTransportError &&
@@ -451,7 +465,7 @@ test('網路錯誤不轉述 err.message（原訊息可能夾帶憑證或 URL）'
 test('redirect 一律不跟隨（redirect: manual + 3xx 直接拒絕），避免 Bearer 外洩', async function () {
   const calls = [];
   await assert.rejects(
-    callV1({ fetch: jsonResponse(302, '', calls), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {} }),
+    callV1({ fetch: jsonResponse(302, '', calls), baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' } }),
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'redirect_blocked'; }
   );
   assert.strictEqual(calls.length, 1, '不得跟著 redirect 再打一次');
@@ -469,7 +483,7 @@ test('整趟逾時 20 秒為預設，且逾時會 abort 傳給 fetch 的 signal'
     });
   };
   await assert.rejects(
-    callV1({ fetch: hangingFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, timeoutMs: 20 }),
+    callV1({ fetch: hangingFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, timeoutMs: 20 }),
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'timeout'; }
   );
   assert.strictEqual(seenInit.signal.aborted, true);
@@ -478,7 +492,7 @@ test('整趟逾時 20 秒為預設，且逾時會 abort 傳給 fetch 的 signal'
 test('注入的 fetch 忽略 signal、永不 settle 時，整趟 deadline 仍會收斂成 timeout', async function () {
   const deafFetch = function () { return new Promise(function () { /* 永不 settle，也不理 signal */ }); };
   await assert.rejects(
-    callV1({ fetch: deafFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, timeoutMs: 20 }),
+    callV1({ fetch: deafFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, timeoutMs: 20 }),
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'timeout'; }
   );
 });
@@ -491,7 +505,7 @@ test('讀 body 忽略 signal、永不 settle 時，逾時一樣涵蓋讀取內�
     });
   };
   await assert.rejects(
-    callV1({ fetch: deafBodyFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, timeoutMs: 20 }),
+    callV1({ fetch: deafBodyFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, timeoutMs: 20 }),
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'timeout'; }
   );
 });
@@ -510,7 +524,7 @@ test('逾時後才回來的 response 會被安全消化（不留懸空 body）',
     });
   };
   await assert.rejects(
-    callV1({ fetch: lateFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, timeoutMs: 10 }),
+    callV1({ fetch: lateFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, timeoutMs: 10 }),
     function (err) { return err.code === 'timeout'; }
   );
   await new Promise(function (r) { setTimeout(r, 80); });
@@ -521,7 +535,7 @@ test('正常完成會清掉 deadline timer（不把行程留在事件圈裡）',
   const before = process.getActiveResourcesInfo ? process.getActiveResourcesInfo().filter(isTimeout_).length : 0;
   const result = await callV1({
     fetch: jsonResponse(200, { data: { items: [] } }),
-    baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, timeoutMs: 60000
+    baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, timeoutMs: 60000
   });
   assert.deepStrictEqual(result.data, { items: [] });
   const after = process.getActiveResourcesInfo ? process.getActiveResourcesInfo().filter(isTimeout_).length : 0;
@@ -538,7 +552,7 @@ test('timeoutMs 只接受有限正整數', async function () {
   };
   for (const bad of [0, -1, 1.5, NaN, Infinity, '5000']) {
     await assert.rejects(
-      callV1({ fetch: fetchImpl, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, timeoutMs: bad }),
+      callV1({ fetch: fetchImpl, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, timeoutMs: bad }),
       function (err) { return err instanceof LiteJiraTransportError && err.code === 'invalid_argument'; },
       String(bad)
     );
@@ -552,7 +566,7 @@ test('外部 signal 已取消：一次 fetch 都不發', async function () {
   let called = 0;
   const fetchImpl = function () { called += 1; return Promise.resolve({ status: 200, text: function () { return Promise.resolve('{"data":{}}'); } }); };
   await assert.rejects(
-    callV1({ fetch: fetchImpl, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, signal: controller.signal }),
+    callV1({ fetch: fetchImpl, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, signal: controller.signal }),
     function (err) { return err instanceof LiteJiraTransportError && err.code === 'aborted'; }
   );
   assert.strictEqual(called, 0);
@@ -566,7 +580,7 @@ test('外部 signal 中途取消會連動內部 controller，並回 aborted（�
     });
   };
   const pending = callV1({
-    fetch: hangingFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: {}, signal: controller.signal
+    fetch: hangingFetch, baseUrl: BASE, token: TOKEN, action: 'searchTickets', params: { project: 'LTJ' }, signal: controller.signal
   });
   controller.abort();
   await assert.rejects(pending, function (err) {

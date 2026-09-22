@@ -41,6 +41,7 @@ function parseCommand(argv) {
       action: 'searchTickets',
       params: compactParams_({
         project,
+        mine: options.values.mine,
         q: options.values.q,
         // 多值條件用重複旗標（--status open --status doing），轉成陣列後由傳輸層展開成重複 query。
         type: options.multi.type,
@@ -199,6 +200,11 @@ async function runCli(argv, env, io, fetchImpl) {
     return 2;
   }
 
+  // 與 MCP 相同：我的跨專案查詢不偷偷套用預設專案。
+  if (parsed.action === 'searchTickets' && !parsed.params.project && !parsed.params.mine && runtimeEnv.LTJ_PROJECT) {
+    parsed.params.project = runtimeEnv.LTJ_PROJECT;
+  }
+
   let result;
   try {
     result = await callV1({
@@ -229,48 +235,6 @@ async function runCli(argv, env, io, fetchImpl) {
     output.log(formatHuman_(parsed.command, result.data));
   }
   return 0;
-}
-
-// LJ-116 批次 3: 錯誤訊息脫敏 — 截短 200 字 + 剝敏感 header 痕跡 + 遮罩 token 字串
-function sanitizeErrorBody_(text) {
-  if (!text) return '';
-  // 1. 剝行首敏感 header 行
-  const lines = String(text).split('\n').filter(function(line) {
-    return !/^\s*(set-cookie|authorization|cookie|x-litejira-token|x-litejira-pat):/i.test(line);
-  });
-  let out = lines.join('\n');
-  // 2. 遮罩 token 字串（Bearer xxx / ltj_pat_xxx / Authorization: ... 形態）
-  out = out.replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer ***');
-  out = out.replace(/ltj_pat_[A-Za-z0-9]+/gi, 'ltj_pat_***');
-  out = out.replace(/Authorization\s*[:=]\s*[^,\s"]+/gi, 'Authorization: ***');
-  out = out.replace(/Set-Cookie\s*[:=]\s*[^,\s"]+/gi, 'Set-Cookie: ***');
-  // 3. 截短
-  if (out.length > 200) out = out.slice(0, 200) + '...(截短)';
-  return out;
-}
-
-async function postLiteJiraApi(fetchFn, url, token, action, params) {
-  const response = await fetchFn(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      token,
-      action,
-      params,
-      requestId: 'ltj-' + Date.now()
-    })
-  });
-  const text = await response.text();
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch (err) {
-    throw new Error('API 回傳非 JSON：HTTP ' + response.status);
-  }
-  if (!response.ok) {
-    throw new Error('HTTP ' + response.status + ': ' + sanitizeErrorBody_(text));
-  }
-  return payload;
 }
 
 function parseOptions_(args) {
@@ -361,10 +325,12 @@ function formatMemberRef_(member) {
 function printUsage_(writeLine) {
   writeLine('用法（API v1）:');
   writeLine('  ltj search [--project <project>] [--q <text>] [--limit 50] [--cursor <cursor>]');
-  writeLine('             [--sort updatedAt|createdAt|key] [--order asc|desc]');
+  writeLine('             [--sort <排序欄位>] [--order asc|desc]');
   writeLine('             [--type/--status/--status-group/--priority/--module/--subtype <值>]（可重複 = 多值）');
   writeLine('             [--target-version <v>] [--found-version <v>]（可重複）');
   writeLine('             [--assignee-id <uuid>] [--owner-id <uuid>] [--creator-id <uuid>] [--parent-id <uuid>]');
+  writeLine('             [--mine assignee|creator|watcher]（跨專案時不可搭配其他篩選）');
+  writeLine('             專案省略時採用 LTJ_PROJECT；只帶 --mine 時不套用預設專案。');
   writeLine('  ltj show <ticket>                       工單詳情（ticket 可用 UUID / 工單 key / 數字 key）');
   writeLine('  ltj comments <ticket> [--limit 50] [--cursor <c>] [--order asc|desc]');
   writeLine('  ltj activity <ticket> [--limit 50] [--cursor <c>] [--order asc|desc] [--kind user|system]');
@@ -382,8 +348,7 @@ function printUsage_(writeLine) {
 
 module.exports = {
   parseCommand,
-  runCli,
-  postLiteJiraApi
+  runCli
 };
 
 if (require.main === module) {

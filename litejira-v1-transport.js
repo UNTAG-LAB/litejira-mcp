@@ -122,6 +122,49 @@ const SORT_VALUES = Object.freeze([
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 // GH-313：唯一天然跨專案的篩選維度（後端 read-queries.ts 的 `MINE_DIMS`，R-A15 三）。
 const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher']);
+
+// ── 工單篩選維度登錄表（後端 P4.2d／P5.6 的完整查詢面）──────────────────────
+//
+// 事實源逐項對照：
+//   `ENUM_FILTER_DIMS` / `TEXT_FILTER_DIMS`  → v2/server/src/api/v1/read-queries.ts
+//   四個運算子欄的展開與 `overdue` 的布林解析 → v2/server/src/api/v1/routes/ticket-filter.ts
+//   `id` 的 UUID 形狀與上限             → 同檔 `TICKET_ID_FILTER_MAX`
+//
+// 🔴 **這裡放維度、不放展開後的欄位名**：展開由 `expandFilterFields_` 做，
+// 白名單、多值表、UUID 表全部從同兩張清單推導 —— 手抄一份三十幾列的欄位名，
+// 漏掉其中一列的症狀是靜默的（參數被本機丟掉、呼叫端以為有濾到）。
+const ENUM_FILTER_DIMS = Object.freeze([
+  'type', 'status', 'statusGroup', 'priority', 'module', 'subtype',
+  'targetVersion', 'foundVersion', 'assigneeId', 'creatorId', 'ownerId', 'parentId'
+]);
+// 列舉維度各兩個運算子欄：`X`（是）與 `XNot`（不是）。
+const ENUM_FILTER_OPS = Object.freeze(['', 'Not']);
+// 文字維度四個運算子欄。與 `q` 不是同一件事：`q` 是跨欄合併搜尋，這兩個維度各只看一欄。
+const TEXT_FILTER_DIMS = Object.freeze(['title', 'description']);
+const TEXT_FILTER_OPS = Object.freeze(['', 'Not', 'Contains', 'NotContains']);
+// 值是識別碼（UUID）的列舉維度：本機先擋形狀，讓「傳了姓名」拿到看得懂的錯誤而不是空清單。
+const UUID_FILTER_DIMS = Object.freeze(['assigneeId', 'creatorId', 'ownerId', 'parentId']);
+// `?id=` 一次最多指名幾張（後端 `TICKET_ID_FILTER_MAX`）。有界是守門不是禮貌：
+// 沒有上界時 `?id=` 可以拿來一次探測幾千個 UUID 的存在性。
+const TICKET_ID_FILTER_MAX = 50;
+
+function expandFilterFields_(dims, ops) {
+  const out = [];
+  dims.forEach((dim) => { ops.forEach((op) => { out.push(dim + op); }); });
+  return out;
+}
+
+// 三十二個運算子欄（12 × 2 ＋ 2 × 4）。順序＝維度順序 × 運算子順序，兩層都由上面的清單決定。
+const TICKET_FILTER_FIELDS = Object.freeze(
+  expandFilterFields_(ENUM_FILTER_DIMS, ENUM_FILTER_OPS)
+    .concat(expandFilterFields_(TEXT_FILTER_DIMS, TEXT_FILTER_OPS)));
+// 其中值必須是 UUID 的（四個成員／母單維度 × 兩個運算子）＋ 指名清單 `id`。
+const TICKET_FILTER_UUID_FIELDS = Object.freeze(
+  expandFilterFields_(UUID_FILTER_DIMS, ENUM_FILTER_OPS).concat(['id']));
+// 全部篩選欄都是多值（後端 `multiParam`：同名參數重複出現＝聯集）；`id` 同樣是多值。
+const TICKET_FILTER_MULTI_FIELDS = Object.freeze(TICKET_FILTER_FIELDS.concat(['id']));
+// 範圍 / 排序 / 分頁以外的完整查詢面。`overdue` 是布林（後端只認 true／false 兩個字面）。
+const TICKET_QUERY_FIELDS = Object.freeze(TICKET_FILTER_MULTI_FIELDS.concat(['q', 'overdue']));
 const ACTIVITY_KIND_VALUES = Object.freeze(['user', 'system']);
 const STATS_SCOPE_VALUES = Object.freeze(['all', 'me']);
 
@@ -145,6 +188,7 @@ const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
 //   query.enums   固定值域
 //   query.int     必須是正整數
 //   query.bool    必須是布林（序列化為 true / false）
+//   query.maxValues 多值參數的值數上限（超過一律本機擋下，不截斷成前 N 個）
 //   query.required 契約上必填的 query（缺了本機就擋，不送出半套查詢）
 //   query.exclusive 互斥組：同一組內最多只能出現一個
 //   body.allow / body.required / body.nullable / body.uuid / body.uuidArray / body.url
@@ -165,19 +209,17 @@ const ACTION_MAP = Object.freeze({
     pathTemplate: '/tickets',
     pathParams: Object.freeze([]),
     query: Object.freeze({
-      allow: Object.freeze([
-        'project', 'mine', 'q', 'limit', 'cursor', 'sort', 'order',
-        'type', 'status', 'statusGroup', 'priority', 'module', 'subtype',
-        'targetVersion', 'foundVersion',
-        'assigneeId', 'creatorId', 'ownerId', 'parentId'
-      ]),
-      uuid: Object.freeze(['assigneeId', 'creatorId', 'ownerId', 'parentId']),
-      multi: Object.freeze([
-        'type', 'status', 'statusGroup', 'priority', 'module', 'subtype',
-        'targetVersion', 'foundVersion'
-      ]),
+      // 範圍（project / mine）＋ 排序分頁 ＋ 完整篩選面（32 個運算子欄 ＋ q ＋ overdue ＋ id）。
+      // 篩選那一段由維度登錄表展開，不逐欄手抄 —— 見 `TICKET_FILTER_FIELDS` 檔頭。
+      allow: Object.freeze(
+        ['project', 'mine', 'limit', 'cursor', 'sort', 'order'].concat(TICKET_QUERY_FIELDS)),
+      uuid: TICKET_FILTER_UUID_FIELDS,
+      multi: TICKET_FILTER_MULTI_FIELDS,
       enums: Object.freeze({ sort: SORT_VALUES, order: ORDER_VALUES, mine: MINE_VALUES }),
       int: Object.freeze(['limit']),
+      bool: Object.freeze(['overdue']),
+      // `id` 的上限與後端同一個數字：超過就是本機擋下，不送出一發必定 422 的查詢。
+      maxValues: Object.freeze({ id: TICKET_ID_FILTER_MAX }),
       // 範圍守門：沒有 project 就必須有 mine，且此時只剩排序與分頁能帶
       //（排序與分頁不改變「框到哪些單」，故不算一般篩選——同後端 `generalFilterKeys` 的判準）。
       scope: Object.freeze({
@@ -816,6 +858,7 @@ function buildQuery(route, params) {
   const multiKeys = spec.multi || [];
   const intKeys = spec.int || [];
   const boolKeys = spec.bool || [];
+  const maxValues = spec.maxValues || {};
   const enums = spec.enums || {};
   const search = new URLSearchParams();
   const present = [];
@@ -834,6 +877,12 @@ function buildQuery(route, params) {
     if (values.length === 0) return;
     if (values.length > 1 && multiKeys.indexOf(key) === -1) {
       throw invalidArg_('參數「' + key + '」不接受多值（v1 只允許單一值）', { param: key });
+    }
+    // 有上界的多值參數（目前只有 `id`）：超過就當面擋下並講出上限，
+    // 不截斷成前 N 個 —— 截斷會讓呼叫端拿到一份比要求更窄的清單而看不出少了什麼。
+    if (typeof maxValues[key] === 'number' && values.length > maxValues[key]) {
+      throw invalidArg_('參數「' + key + '」一次最多 ' + maxValues[key] + ' 個值（收到 ' + values.length + ' 個）',
+        { param: key, count: values.length, max: maxValues[key] });
     }
 
     values.forEach((one) => {
@@ -1394,6 +1443,8 @@ module.exports = {
   BATCH_MAX_TICKETS,
   COMPOSITE_ACTIONS,
   DEFAULT_TIMEOUT_MS,
+  ENUM_FILTER_DIMS,
+  ENUM_FILTER_OPS,
   NORMAL_FIELDS,
   IDEMPOTENCY_KEY_PATTERN,
   LiteJiraApiError,
@@ -1404,7 +1455,15 @@ module.exports = {
   REPLACED_ACTIONS,
   SORT_VALUES,
   STATS_SCOPE_VALUES,
+  TEXT_FILTER_DIMS,
+  TEXT_FILTER_OPS,
+  TICKET_FILTER_FIELDS,
+  TICKET_FILTER_MULTI_FIELDS,
+  TICKET_FILTER_UUID_FIELDS,
+  TICKET_ID_FILTER_MAX,
+  TICKET_QUERY_FIELDS,
   TICKET_REF_PATTERN,
+  UUID_FILTER_DIMS,
   UUID_PATTERN,
   buildRequest,
   callV1,

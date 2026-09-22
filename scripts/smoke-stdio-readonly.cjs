@@ -164,6 +164,18 @@ async function main() {
       return items.length + ' 張（nextCursor=' + String(data.nextCursor) + '）';
     });
 
+    // 新的篩選運算子（XNot / XContains / overdue）：只驗**伺服器收、本機不誤擋**。
+    // 語意（「不是」有沒有含空值、逾期算不算對）證明不了——那要有已知資料的驗收案例，
+    // 一支對任意專案跑的唯讀 smoke 沒有那個前提，所以這裡不假裝驗到了。
+    await step('tools/call litejira.searchTickets（statusNot / titleContains / overdue）', async function () {
+      const result = resultOf(await client.call('tools/call', {
+        name: 'litejira.searchTickets',
+        arguments: { limit: 5, statusNot: '不存在的狀態', titleContains: 'a', overdue: false }
+      }), 'searchTickets 篩選運算子');
+      const data = toolData(result, 'searchTickets 篩選運算子');
+      return (data.items || []).length + ' 張（伺服器接受這三個條件）';
+    });
+
     if (!ticket) {
       console.log('⏭ 沒有可用工單（搜尋結果為空且未設 LTJ_SMOKE_TICKET）：略過工單相關的 4 項');
     } else {

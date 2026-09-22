@@ -100,15 +100,35 @@ const needsReason = action.direction === 'back' || action.label === REASON_REQUI
 | 批次上限 100、無樂觀鎖、部分成功 | 批次路由 | 一致 |
 | 附件只有 `{ url, name? }`、以 id 刪除、204 | 附件路由 | 一致 |
 
-### 已知落差（**不在本包範圍**，刻意不做）
+### 已知落差（前一輪列為「不在本包範圍」，本輪補齊）
 
-後端 P4.2d 把工單篩選擴成 **33 個查詢參數**（12 個列舉維度 × `X`/`XNot`、
-2 個文字維度 × `X`/`XNot`/`XContains`/`XNotContains`、`overdue`、`id`（最多 50 張））。
-MCP 目前只接「是」那一組 ＋ `q`。
+後端 P4.2d／P5.6 把工單篩選擴成完整的查詢面，MCP 原本只接「是」那一組 ＋ `q`。
+那是**能力缺口而不是契約違反**（白名單會當面拒絕，不存在「以為濾到了其實沒濾」），
+但呼叫端也**用不到**：助手看不到參數、傳輸層擋下、CLI 沒有旗標。
 
-這是**能力缺口，不是契約違反**：MCP 沒有任何說明宣稱支援那些運算子，傳輸層白名單會當面拒絕，
-不存在「以為濾到了其實沒濾」的情形。補齊是另一包的事（會動到工具 schema 的形狀）。
-本包不擴大能力範圍，只把「說錯的」改對。
+**本輪補齊的能力**（欄位數由維度 × 運算子推導，不抄文件上的數字）：
+
+| 來源 | 維度 | 運算子 | 欄位數 |
+|---|---|---|---|
+| `read-queries.ts` `ENUM_FILTER_DIMS` | 12（`type` / `status` / `statusGroup` / `priority` / `module` / `subtype` / `targetVersion` / `foundVersion` / `assigneeId` / `creatorId` / `ownerId` / `parentId`） | `X` / `XNot` | 24 |
+| `read-queries.ts` `TEXT_FILTER_DIMS` | 2（`title` / `description`） | `X` / `XNot` / `XContains` / `XNotContains` | 8 |
+| `routes/ticket-filter.ts` | `overdue`（布林，只認 `true`/`false`） | — | 1 |
+| `routes/ticket-filter.ts` `TICKET_ID_FILTER_MAX` | `id`（UUID，一次最多 50 張） | — | 1 |
+
+另補：**所有**列舉維度都是多值（後端 `multiParam`），包含原本只收單值的四個 UUID 維度。
+
+**做法**
+- 傳輸層放**維度登錄表**（`ENUM_FILTER_DIMS` / `TEXT_FILTER_DIMS` ＋ 兩張運算子表），
+  白名單、多值表、UUID 表、CLI 旗標、工具 schema **全部由它推導**。
+  三十幾列的欄位名抄第二份時，漏掉其中一列不會有任何症狀——這與後端用
+  `Record<EnumFilterDim, …>` 完整映射的理由是同一條。
+- 範圍守門**沿用原樣**：新參數全部落在「一般篩選」那一側，所以跨專案（只帶 `mine`）時
+  一項都繞不過 R-A15 四。守門的白名單是「排序與分頁」，不是「篩選的黑名單」——
+  加維度不必改守門，這一點有逐欄的回歸測試釘住。
+- `id` 的上界（50）與 `overdue` 的布林在**本機先擋**，錯誤訊息講出上限與合法值；
+  超過上限不截斷成前 50 個（截斷會回一份比要求更窄的清單而看不出少了什麼）。
+- 文字條件的空字串**當面拒絕**：後端會把 `?titleContains=` 靜默當成「沒有指定」，
+  本層擋下才講得出「你這個條件沒有生效」。
 
 ## 與 GH-303（舊 GAS 傳輸韌性修正）的對照
 
@@ -136,9 +156,13 @@ MCP 目前只接「是」那一組 ＋ `q`。
 | `package.json` | 改 | `2.11.0` → `3.0.0`；描述改「LiteJira 2.0 … REST API v1」；加 `npm run smoke`；`files` 納入 smoke 腳本 |
 | `litejira-v1-transport.js` | 改 | `SORT_VALUES` 補成契約的 15 欄；新增 `MINE_VALUES` 並匯出；`searchTickets` 路由加 `mine` 與 `query.scope`；`buildQuery` 實作範圍守門 |
 | `litejira-mcp-server.js` | 改 | searchTickets 的描述 / `project` / 新 `mine` 參數；`toV1Params_` 的 `projectAlternative` 與「跨專案不套預設專案」；三個流轉工具的 reason 說明；`instructions` 與 `weekly-status` / `close-ticket` 提示 |
+| `litejira-v1-transport.js`（搜尋能力） | 改 | 維度登錄表 ＋ `searchTickets` 白名單／多值／UUID／`bool`／`maxValues` 全面推導 |
+| `litejira-mcp-server.js`（搜尋能力） | 改 | 工具 schema 由登錄表產生 32 個運算子欄 ＋ `overdue` / `id`；工具說明與 `instructions` |
+| `ltj-cli.js`（搜尋能力） | 改 | 篩選旗標由登錄表推導（`--status-not`、`--title-contains`…）、`--overdue`、`--id`、用法說明 |
+| `test/gh-257-search-filter-ops.test.js` | 新 | 20 項：登錄表對照後端、query mapping 三方一致、逐欄正例、六組反例、跨專案逐欄負面靶 |
 | `test/gh-313-contract-drift.test.js` | 新 | 13 項：三個靶的正反例（含「說明不得再宣稱跨專案搜尋」這種會回歸的措辭斷言） |
 | `test/gh-313-stdio-smoke.test.js` | 新 | 3 項：真 spawn stdio ＋ 本機 stub，覆蓋 4 讀取工具 / 6 資源 / 4 提示；寫入被擋；smoke 腳本自身可用 |
-| `scripts/smoke-stdio-readonly.cjs` | 新 | 對真伺服器跑的唯讀 stdio smoke（憑證只從環境變數讀、不印出；子行程強制 `LTJ_MCP_ENABLE_WRITES=false`） |
+| `scripts/smoke-stdio-readonly.cjs` | 新／改 | 對真伺服器跑的唯讀 stdio smoke（憑證只從環境變數讀、不印出；子行程強制 `LTJ_MCP_ENABLE_WRITES=false`）；本輪多一步「伺服器收不收 `statusNot` / `titleContains` / `overdue`」，故正式站下次跑是 20 步而非 19 步 |
 | `test/gh-257-pack2-mcp-read.test.js` | 改 | 四項舊斷言改成真契約（缺專案＝本機擋下、sort 值域 15 欄） |
 | `test/gh-257-v1-transport.test.js` | 改 | 通用 fixture 補 `project`（它們測的是傳輸機制，不是範圍守門） |
 | `README.md` | 改 | 新增「3.0 是 LiteJira 2.0 專用」對照表；正式 URL；權杖沿用；`LTJ_PROJECT` 取得方式與必填；寫入未知不可盲重試；唯讀 smoke 用法；四條新的故障排除 |
@@ -153,13 +177,30 @@ MCP 目前只接「是」那一組 ＋ `q`。
 - 隔離突變移除 CLI 預設專案接線，對應測試轉紅；还原後轉綠。
 - 安全審查採納：移除 `ltj-cli.js` 遺留的 `postLiteJiraApi` 與脫敏函式，避免匯出仍會自動轉送 body token 的 GAS 通道。另補 CLI `LTJ_PROJECT` 預設與 `--mine`，跨專案不套用預設專案；`test/gh-257-cli-scope.test.js` 兩項回歸。
 - 最終獨立審查無功能阻擋；採納文件測試數／變更清單過期的提醒並修正。
+- 搜尋能力補齊後重跑 `node --test`：**211/211 通過，0 跳過，退出碼 0**（前一輪 191 項 ＋ 本輪 20 項）。
+  隔離突變：把 `TEXT_FILTER_OPS` 拿掉 `NotContains`，登錄表對照／運算子存在性／文字複合三項轉紅；還原後轉綠。
+- ⚠️ **新篩選尚未對真後端驗收**：本輪全部是注入假 fetch 的本機驗證。
+  正式站唯讀加驗待主控執行（見下「未完成與限制」）。
 
 ## 未完成與限制
 
 正式工單沒有寫入；本機真資料庫寫入不能冒稱正式雲端寫入。24 小時冪等保留期未等待實測；完整正式寫入驗收須另有測試工單授權。
+
+本輪補齊的搜尋運算子只有本機驗證，**需要主控對正式站補跑唯讀驗收**（一發都不寫入）：
+`statusNot`（要撈得到該欄為空的單）、`assigneeIdNot`（未指派也要在內）、
+`titleContains` / `descriptionNotContains`、`overdue=true` 與 `overdue=false`（後者要含沒填到期日的單）、
+`id` 指名一張與指名 50 張、同一維度多值＝聯集／跨維度＝交集各一例、
+以及負面靶：只帶 `mine` ＋ `statusNot`（本機就該擋、伺服器同樣拒絕）、`overdue=yes`、`id=BUG-481`、51 個 `id`。
+重點是確認**伺服器真的照這些條件收斂**，而不只是「HTTP 200」——本機測試證明得了形狀，證明不了語意。
 
 npm publish、Git tag 與遠端整合尚未執行。P7.14／P4.12 尚不標全數完成。主庫背景 worker 的 pin 保留，另待 P7.15 消費端改版；不能只改 pin 造成舊 GAS 呼叫者失效。DEV 既有本機 PAT 對 2.0 回 unauthenticated，未挪用正式 PAT。
 
 ## 舊主線整合
 
 已將 origin/main d90cfc2 納入本機升級分支的合併歷史。衝突採用已驗證的 REST 實作與 3.0.0 版號；舊 GAS 兩段取結果的 postLiteJiraApi 已退役，專測該函式的 gh-303-transport-resilience.test.js 隨之退役（歷史仍保留在 d90cfc2）。其安全要求由現行傳輸測試覆蓋：禁止轉址、固定錯誤訊息、整趟期限、寫入不重送與結果未知提示；沒有把舊 GAS 重試邏輯帶進新版。此為本機整合，尚未推送遠端。
+
+## 搜尋補齊最終驗收（2026-09-22）
+
+32 個運算子欄、overdue、id（最多50個UUID）及成員多值已提供MCP與CLI。主控與獨立Sonnet均211/211通過；主控以真stdio/HTTP/一次性PostgreSQL驗證文字等於/不等於/包含/不包含、類型排除、空負責人被Not保留、50個id、逾期true/false及跨專案範圍拒絕，原18工具6資源4提示回歸通過。多值否定按整個集合排除，文件已明說。
+
+更新的3.0.0候選已打包並安裝本機；實際安裝包對正式站唯讀20/20通過。正式寫入仍未驗，公開Git/npm/tag/Release依使用者「先不發布」不執行。既有MCP程序需重啟才載入新schema。

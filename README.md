@@ -173,6 +173,7 @@ LTJ_PROJECT=<你的專案 key>
 | 你說 | AI 會做 | 本版 |
 |------|--------|------|
 | 「搜尋 login 相關的工單」 | 搜尋篩選 | ✅（在 `LTJ_PROJECT` 這個專案裡；跨專案只支援「我的」） |
+| 「找標題有『閃退』、但狀態不是已關閉、而且逾期的單」 | 「不是」＋「包含」＋逾期複合篩選 | ✅（見下「搜尋能篩到多細」） |
 | 「列出我手上／我建的／我關注的單」 | 跨專案的「我的」查詢 | ✅（此時不能再加其他篩選條件） |
 | 「查 BUG-530 完整內容」 | 讀工單詳情 | ✅ |
 | 「BUG-530 的留言和歷程給我看」 | 讀留言 / 時間軸 | ✅ |
@@ -189,6 +190,29 @@ LTJ_PROJECT=<你的專案 key>
 | 「留言說明並同時改狀態，一次完成」 | 先改狀態、再留言（兩步，非原子） | ✅（中途失敗會明講哪一步沒成，不會自動還原） |
 | 「把 BUG-530 的到期日改成下週五」 | 改單一欄位 | ✅（改狀態除外：那要說動作名稱，走一般流轉） |
 | 「這 20 張一起送測 / 一起轉派 / 一起改版本」 | 批量操作（一次最多 100 張） | ✅（會回成功與失敗兩份清單） |
+
+### 搜尋能篩到多細
+
+每個篩選維度都有「是」與「不是」兩種問法，文字欄位再多兩種：
+
+| 問法 | 參數（CLI 旗標） | 例 |
+|------|------------------|----|
+| 是（多值＝其中之一） | `status`（`--status`） | `status=["開發中","待驗收"]` |
+| 不是 | `statusNot`（`--status-not`） | `statusNot=已關閉`（**也會撈到該欄為空的單**，例如「處理人不是張三」含未指派） |
+| 標題／內文包含 | `titleContains` / `descriptionContains`（`--title-contains`） | `titleContains=閃退` |
+| 標題／內文不包含 | `titleNotContains` / `descriptionNotContains` | `titleNotContains=[已知]` |
+| 已逾期 | `overdue`（`--overdue true\|false`） | 有到期日、已過期且尚未進終態 |
+| 指名這幾張 | `id`（`--id`，可重複） | 只收 UUID，一次最多 50 張 |
+
+適用的 12 個維度：`type` / `status` / `statusGroup` / `priority` / `module` / `subtype` /
+`targetVersion` / `foundVersion` / `assigneeId` / `creatorId` / `ownerId` / `parentId`
+（後四個只收成員或工單 UUID），外加兩個文字維度 `title` / `description`。
+
+肯定條件給多值時匹配**任一值**；`Not`／`NotContains` 則**排除整個值集合**（例如 `typeNot=[BUG,TASK]` 會同時排除 BUG 與 TASK）。不同條件之間是**交集**。`q` 是跨欄合併搜尋，
+只想比對單一欄請改用 `titleContains` / `descriptionContains`。
+
+> 上表每一項都是**一般篩選**：跨專案（只帶 `mine`）時一項都不能帶，
+> 伺服器與本工具都會直接拒絕，不會靜默忽略。排序與分頁不受此限。
 
 AI 會自動載入成員清單、版本列表、工作流規則。
 
@@ -209,7 +233,9 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | `unauthenticated` | 確認 `~/.litejira/credentials.env` 的權杖沒打錯，或請 admin 換一把 |
 | `membership_required` / `permission_denied` | 前者是你不在該專案，後者是角色權限不足 → 找 admin |
 | 說「請指定專案」 | credentials.env 加 `LTJ_PROJECT=<key>`（專案 key 在 webapp 的專案設定頁），或在資源 URI 帶 `?project=<key>` |
-| 說「跨專案查詢不接受一般篩選」 | 跨專案只能查「我的」。要篩選就指定專案 |
+| 說「跨專案查詢不接受一般篩選」 | 跨專案只能查「我的」。要篩選就指定專案（`statusNot` / `titleContains` / `overdue` / `id` 也都算篩選） |
+| 說「overdue 只接受布林值」 | `overdue` 只認 `true` / `false`；`"yes"`、`1` 一律拒絕（打錯字與明確指定要分得出來） |
+| 說「id 一次最多 50 個值」 | `id` 是指名查詢不是翻頁：超過 50 張請改用篩選條件＋ `cursor` 分頁 |
 | 大量 `invalid_response`（不是 JSON） | `LTJ_API_URL` 可能還指著舊的 Apps Script 後端。3.x 只連 `https://litejira.untaglab.com` 這類 2.0 REST 站 |
 | 寫入回逾時 / 5xx / `in_progress`，不知道成功沒 | **先讀工單現況**再說。要重送就用同一把 idempotencyKey ＋ 完全相同的輸入，且在 24 小時內；不要換新 key |
 | `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |

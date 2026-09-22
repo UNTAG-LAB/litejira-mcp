@@ -5,7 +5,9 @@
 const {
   callV1,
   LiteJiraApiError,
-  LiteJiraTransportError
+  LiteJiraTransportError,
+  TICKET_FILTER_MULTI_FIELDS,
+  TICKET_ID_FILTER_MAX
 } = require('./litejira-v1-transport');
 
 // 本機拒絕（送出前就知道不合法 / 契約缺列）→ exit 2；真的打出去才失敗（網路、逾時、業務錯誤）→ exit 1。
@@ -39,24 +41,15 @@ function parseCommand(argv) {
   if (command === 'search') {
     return Object.assign({}, base, {
       action: 'searchTickets',
-      params: compactParams_({
+      // 篩選面（32 個運算子欄 ＋ id）由傳輸層的登錄表展開成旗標，不在本檔抄第二份清單：
+      // 抄漏一欄的症狀是靜默的（旗標被當成未知選項丟掉，呼叫端以為有濾到）。
+      params: compactParams_(Object.assign({
         project,
         mine: options.values.mine,
         q: options.values.q,
-        // 多值條件用重複旗標（--status open --status doing），轉成陣列後由傳輸層展開成重複 query。
-        type: options.multi.type,
-        status: options.multi.status,
-        statusGroup: options.multi['status-group'],
-        priority: options.multi.priority,
-        module: options.multi.module,
-        subtype: options.multi.subtype,
-        targetVersion: options.multi['target-version'],
-        foundVersion: options.multi['found-version'],
+        // 布林旗標：只認 true / false，其他值原樣往下讓傳輸層當面拒絕（不把打錯字當成假）。
+        overdue: toBooleanOrRaw_(options.values.overdue),
         // 成員 / 父工單一律 UUID；--assignee 之類的顯示名保留只為了給出明確指路錯誤，不在本層猜人。
-        assigneeId: options.values['assignee-id'],
-        ownerId: options.values['owner-id'],
-        creatorId: options.values['creator-id'],
-        parentId: options.values['parent-id'],
         assignee: options.values.assignee,
         owner: options.values.owner,
         creator: options.values.creator,
@@ -65,7 +58,7 @@ function parseCommand(argv) {
         cursor: options.values.cursor,
         sort: options.values.sort,
         order: options.values.order
-      }),
+      }, filterFlags_(options))),
       write: false
     });
   }
@@ -275,6 +268,33 @@ function parseOptions_(args) {
   return { positionals, values, multi, flags };
 }
 
+// 查詢參數名 → 旗標名：camelCase 轉 kebab-case（statusGroupNot → --status-group-not、
+// titleNotContains → --title-not-contains、assigneeIdNot → --assignee-id-not）。
+function flagOf_(param) {
+  return param.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+}
+
+// 全部篩選欄都接受多值：同名旗標重複出現＝聯集（--status open --status doing）。
+// 只給一次時仍送單一字串，讓「一個值」的查詢在解析結果裡看起來就是一個值。
+function filterFlags_(options) {
+  const out = {};
+  TICKET_FILTER_MULTI_FIELDS.forEach((param) => {
+    const values = options.multi[flagOf_(param)];
+    if (!values || values.length === 0) return;
+    out[param] = values.length === 1 ? values[0] : values;
+  });
+  return out;
+}
+
+// 布林旗標：只認 true / false 兩個字面。其他值**原樣傳下去**讓傳輸層當面拒絕 ——
+// 在這裡靜默當成 false，會讓打錯字與明確指定分不出來（後端 parseBoolean 同一條判準）。
+function toBooleanOrRaw_(value) {
+  if (value === undefined || value === '') return undefined;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return value;
+}
+
 function compactParams_(params) {
   const out = {};
   Object.keys(params).forEach((key) => {
@@ -328,9 +348,16 @@ function printUsage_(writeLine) {
   writeLine('             [--sort <排序欄位>] [--order asc|desc]');
   writeLine('             [--type/--status/--status-group/--priority/--module/--subtype <值>]（可重複 = 多值）');
   writeLine('             [--target-version <v>] [--found-version <v>]（可重複）');
-  writeLine('             [--assignee-id <uuid>] [--owner-id <uuid>] [--creator-id <uuid>] [--parent-id <uuid>]');
-  writeLine('             [--mine assignee|creator|watcher]（跨專案時不可搭配其他篩選）');
+  writeLine('             [--assignee-id <uuid>] [--owner-id <uuid>] [--creator-id <uuid>] [--parent-id <uuid>]（可重複）');
+  writeLine('             每個上述條件都有「不是」版：加 -not（--status-not、--assignee-id-not、--type-not …）');
+  writeLine('             [--title/--title-not/--title-contains/--title-not-contains <文字>]（可重複）');
+  writeLine('             [--description/--description-not/--description-contains/--description-not-contains <文字>]');
+  writeLine('             [--overdue true|false]（已逾期：有到期日、已過期且未進終態）');
+  writeLine('             [--id <uuid>]（可重複，一次最多 ' + TICKET_ID_FILTER_MAX + ' 張；只收 UUID）');
+  writeLine('             [--mine assignee|creator|watcher]（跨專案時不可搭配上述任何篩選）');
   writeLine('             專案省略時採用 LTJ_PROJECT；只帶 --mine 時不套用預設專案。');
+  writeLine('             肯定條件匹配任一值，-not/-not-contains 排除整個集合；不同條件取交集。--q 跨欄搜尋，');
+  writeLine('             只想比對單一欄請用 --title-contains / --description-contains。');
   writeLine('  ltj show <ticket>                       工單詳情（ticket 可用 UUID / 工單 key / 數字 key）');
   writeLine('  ltj comments <ticket> [--limit 50] [--cursor <c>] [--order asc|desc]');
   writeLine('  ltj activity <ticket> [--limit 50] [--cursor <c>] [--order asc|desc] [--kind user|system]');

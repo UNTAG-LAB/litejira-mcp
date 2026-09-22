@@ -12,12 +12,18 @@ const {
   callV1,
   ACTIVITY_KIND_VALUES,
   BATCH_MAX_TICKETS,
+  ENUM_FILTER_DIMS,
+  ENUM_FILTER_OPS,
   LiteJiraApiError,
   LiteJiraTransportError,
   MINE_VALUES,
   NORMAL_FIELDS,
   ORDER_VALUES,
-  SORT_VALUES
+  SORT_VALUES,
+  TEXT_FILTER_DIMS,
+  TEXT_FILTER_OPS,
+  TICKET_ID_FILTER_MAX,
+  UUID_FILTER_DIMS
 } = require('./litejira-v1-transport');
 
 // LJ-160 #2：版本號單一事實源 = package.json，避免手寫在多處漂移。
@@ -38,7 +44,7 @@ const ENUM_CREATE_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK', 'STD']; // API v1 CREAT
 const ENUM_CONVERT_TARGET_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK'];
 const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中文後綴
 // GH-257：order / sort 值域改以傳輸層契約表為單一事實源，避免兩處漂移。
-// v1 的 sort 只有 updatedAt / createdAt / key —— 舊的 priority / dueDate 不在契約內。
+// GH-313：sort 是後端欄位登錄表推導的 15 欄（舊註解說「只有三個」是漏抄，不是契約）。
 const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
 // GH-313：跨專案查詢唯一的入口（後端 MINE_DIMS）。
@@ -114,12 +120,6 @@ const P_CREATE_DATE = (label) => ({
   description: label + '：YYYY-MM-DD（純日期，不含時間與時區）。null = 不設。',
   pattern: CREATE_DATE_PATTERN
 });
-// GH-257：多值查詢條件 —— 單值傳字串，多值傳字串陣列（送出時展開成重複 query，不做逗號串接）。
-const P_MULTI = (description) => ({
-  type: ['string', 'array'],
-  description: description + '（單值傳字串，多值傳字串陣列）',
-  items: { type: 'string' }
-});
 const P_LIMIT = { type: 'integer', description: 'Max results (1-100，客戶端上限). 超過上限請改用 cursor 分頁。', minimum: 1, maximum: 100 };
 const P_CURSOR = { type: 'string', description: '分頁 cursor（從前一次回應的 nextCursor 帶入）' };
 const P_ORDER = { type: 'string', description: 'Sort order：asc 或 desc', enum: ENUM_ORDER };
@@ -159,12 +159,74 @@ const ENUM_BATCH_FIELDS = NORMAL_FIELDS.concat(['parentId', 'targetVersion', 'fo
 // 版本欄位名 → 版本端點的參數名（單張與批次同名；差別只在單張多支援樂觀鎖）。
 const VERSION_FIELD_PARAM = { targetVersion: 'targetVersionId', foundVersion: 'foundVersionId' };
 
+// ── 工單篩選的完整運算子面（後端 P4.2d／P5.6）────────────────────────────
+//
+// 維度清單與運算子清單都由傳輸層匯入（它才是對照後端 `read-queries.ts` 的那一份），
+// 這裡只負責把每一欄變成一個有說明的 schema。**不在本檔重抄欄位名**：
+// 抄第二份的漏抄症狀是靜默的 —— 少掉的那一欄在工具 schema 裡不存在，
+// 呼叫端只會看到「unknown parameter」而不知道後端其實收。
+const FILTER_DIM_LABELS = {
+  type: '工單類型（動態值，請先讀 litejira://meta）',
+  status: '狀態（動態值依工單 type 而定，請先讀 litejira://workflow/{type}）',
+  statusGroup: '狀態分組（動態值，請先讀 litejira://meta）',
+  priority: '優先級（動態值，請先讀 litejira://meta）',
+  module: '模塊（動態值，請先讀 litejira://meta）',
+  subtype: '子類型（動態值依 type 而定，請先讀 litejira://meta）',
+  targetVersion: '目標版本（動態值，請先讀 litejira://versions）',
+  foundVersion: '發現版本（動態值，請先讀 litejira://versions）',
+  assigneeId: '處理人',
+  creatorId: '建立者',
+  ownerId: '負責人（最終負責人）',
+  parentId: '父工單',
+  title: '標題',
+  description: '內文描述'
+};
+// 四個運算子的語意。`Not` 那一格的但書是後端 `addNotInFilter` 的行為，
+// 講出來的理由：「處理人不是張三」撈不撈得到未指派的單，是呼叫端一定會問的問題。
+const FILTER_OP_NOTES = {
+  '': '＝這些值之一',
+  Not: '「不是」這些值（含該欄為空的工單，例如「處理人不是張三」也會撈到未指派的單）',
+  Contains: '「包含」這段文字（子字串比對，只看這一欄；跨欄搜尋請用 q）',
+  NotContains: '「不包含」這段文字（子字串比對，只看這一欄）'
+};
+const MULTI_VALUE_NOTE = '。單值傳字串，多值傳字串陣列（肯定條件匹配任一值，Not／NotContains 排除整個值集合；不同參數之間＝交集）';
+
+function filterParamSchema_(dim, op) {
+  const label = FILTER_DIM_LABELS[dim] + FILTER_OP_NOTES[op];
+  const isUuid = UUID_FILTER_DIMS.indexOf(dim) !== -1;
+  const item = isUuid
+    ? { type: 'string', pattern: UUID_SCHEMA_PATTERN }
+    // 空字串在後端等同「沒有指定」（會被靜默剔除）；本層當面擋下，不讓呼叫端以為有濾到。
+    : { type: 'string', minLength: 1 };
+  const schema = {
+    type: ['string', 'array'],
+    description: 'Filter：' + label + MULTI_VALUE_NOTE +
+      (isUuid ? '。只收 UUID，顯示名無法查詢，請先讀 litejira://members 取 id' : '') + '。',
+    items: item
+  };
+  if (isUuid) schema.pattern = UUID_SCHEMA_PATTERN;
+  else schema.minLength = 1;
+  return schema;
+}
+
+// 32 個運算子欄（12 個列舉維度 × 2 ＋ 2 個文字維度 × 4），鍵名與查詢參數逐字相同。
+const SEARCH_FILTER_PARAMS = (function () {
+  const out = {};
+  ENUM_FILTER_DIMS.forEach((dim) => {
+    ENUM_FILTER_OPS.forEach((op) => { out[dim + op] = filterParamSchema_(dim, op); });
+  });
+  TEXT_FILTER_DIMS.forEach((dim) => {
+    TEXT_FILTER_OPS.forEach((op) => { out[dim + op] = filterParamSchema_(dim, op); });
+  });
+  return out;
+})();
+
 // ── LJ-095 v2 + LJ-116：Tool 定義（12 個）+ LJ-178 批量（3 個）──
 const TOOL_DEFS = [
   // 既有保留（7 個）
   tool('litejira.searchTickets',
-    'Search and filter tickets via API v1 (GET /tickets). PROJECT IS MANDATORY: pass project=<KEY>, or rely on the LTJ_PROJECT startup setting; with neither the server returns invalid_argument and this tool rejects the call locally. There is NO "omit project to search everything" mode. The ONLY cross-project query is mine=assignee|creator|watcher ("my tickets"), and when you go cross-project the server accepts NO other filter (no q, no type/status/priority/…, no member ids) — add project if you need to filter. Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. Multi-value filters (type/status/statusGroup/priority/module/subtype/targetVersion/foundVersion) accept a string or an array of strings. Use litejira://ticket/{id} for one complete ticket.',
-    'searchTickets', false, {
+    'Search and filter tickets via API v1 (GET /tickets). PROJECT IS MANDATORY: pass project=<KEY>, or rely on the LTJ_PROJECT startup setting; with neither the server returns invalid_argument and this tool rejects the call locally. There is NO "omit project to search everything" mode. The ONLY cross-project query is mine=assignee|creator|watcher ("my tickets"), and when you go cross-project the server accepts NO other filter (no q, no type/status/priority/…, no member ids) — add project if you need to filter. Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. EVERY filter dimension accepts a string or an array of strings (positive conditions match any listed value; Not and NotContains exclude the entire listed set; different parameters are AND-ed) and EVERY dimension has a negated twin: append "Not" (statusNot, assigneeIdNot, typeNot, …) — a negated filter also matches tickets where that field is empty. The two text dimensions (title / description) additionally take Contains / NotContains for substring matching on that single column (q searches across columns instead). Also available: overdue=true|false (has a due date, past due, not final) and id=<uuid>[] to name up to ' + TICKET_ID_FILTER_MAX + ' specific tickets. All of these are general filters, so none of them may be combined with a bare cross-project mine query. Use litejira://ticket/{id} for one complete ticket.',
+    'searchTickets', false, Object.assign({
       project: { type: 'string', description: '專案 key（必填）。省略時採用啟動環境的 LTJ_PROJECT；' +
         '兩者皆無時本機直接擋下 —— v1 的工單查詢一定要有專案範圍，不存在「不帶就是全部」。' +
         '真的要跨專案請改帶 mine（此時不能再帶任何其他篩選條件）。' },
@@ -177,24 +239,27 @@ const TOOL_DEFS = [
           '要限定專案請明確帶 project。此條件需要權杖有歸屬人，bot 權杖會被伺服器拒。',
         enum: ENUM_MINE
       },
-      q: { type: 'string', description: 'Keyword search across title + description' },
-      type: P_MULTI('Filter by ticket type 工單類型。動態值，請先讀 litejira://meta'),
-      status: P_MULTI('Filter by status 狀態。動態值依工單 type 而定，請先讀 litejira://workflow/{type}'),
-      statusGroup: P_MULTI('Filter by status group 狀態分組。動態值，請先讀 litejira://meta'),
-      priority: P_MULTI('Filter by priority 優先級。動態值，請先讀 litejira://meta'),
-      module: P_MULTI('Filter by module 模塊。動態值，請先讀 litejira://meta'),
-      subtype: P_MULTI('Filter by subtype 子類型。動態值依 type 而定，請先讀 litejira://meta'),
-      targetVersion: P_MULTI('Filter by 目標版本。動態值，請先讀 litejira://versions'),
-      foundVersion: P_MULTI('Filter by 發現版本。動態值，請先讀 litejira://versions'),
-      assigneeId: P_MEMBER_UUID('處理人'),
-      ownerId: P_MEMBER_UUID('負責人（最終負責人）'),
-      creatorId: P_MEMBER_UUID('建立者'),
-      parentId: { type: 'string', description: '父工單 UUID（不是公開 key）', pattern: UUID_SCHEMA_PATTERN },
+      q: { type: 'string', description: 'Keyword search across title + description（跨欄合併搜尋；' +
+        '只想比對單一欄請改用 titleContains / descriptionContains）', minLength: 1 },
+      overdue: {
+        type: 'boolean',
+        description: '已逾期篩選：true = 有到期日、已過期且尚未進終態；false = 其餘（含沒填到期日的單）。' +
+          '省略 = 不過濾。只收布林，不收 "yes" / 0 這類值。'
+      },
+      id: {
+        type: ['string', 'array'],
+        description: '指名工單 UUID（一次最多 ' + TICKET_ID_FILTER_MAX + ' 個；單值傳字串，多值傳陣列）。' +
+          '只收 UUID，不收公開 key / 數字 key（那兩種請用 litejira://ticket/{ref} 逐張讀）。' +
+          '這是一般篩選：跨專案（只帶 mine）時不可使用。',
+        items: { type: 'string', pattern: UUID_SCHEMA_PATTERN },
+        pattern: UUID_SCHEMA_PATTERN,
+        maxItems: TICKET_ID_FILTER_MAX
+      },
       limit: P_LIMIT,
       cursor: P_CURSOR,
       sort: { type: 'string', description: 'Sort field（v1 契約值域，15 欄；預設 updatedAt）', enum: ENUM_SORT },
       order: P_ORDER
-    }, [], {
+    }, SEARCH_FILTER_PARAMS), [], {
       readOnlyHint: true,
       openWorldHint: true,
       title: '搜尋工單'
@@ -1335,16 +1400,19 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
             '- 建單一次填齊 reproSteps / expectedResult / 日期 / tags / ownerId 等正式欄位，別塞進 description。',
             '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[] 的 label' +
               '（退回類動作與「main不受影響」要帶 reason）。',
-            '- updateField 是單欄更新：status 要 force=true（管理者例外），assigneeId 要 reason，版本 / 父工單收 UUID。',
+            '- updateField 單欄更新：status 要 force=true（限管理者），assigneeId 要 reason，版本／父工單收 UUID。',
             '- batch 收 tickets（1-100）；回 succeeded/failed，200 不代表全成功，務必回報 failed。',
             '- replyFeedback 非原子：先流轉再留言，每步各一把衍生鍵；失敗如實回報部分成功。',
             '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（會撞假衝突）。',
-            '- 工單參照可用 UUID id、公開 key（BUG-481）或數字 key；成員條件只收 UUID，先讀 litejira://members。',
+            '- 工單參照可用 UUID / BUG-481 / 數字 key；成員條件只收 UUID，先讀 litejira://members。',
             '- 受控值讀 litejira://meta，版本讀 litejira://versions，流轉讀 litejira://workflow/{type}。',
             '- 專案層級資源取 LTJ_PROJECT 或 URI 帶 ?project=KEY；沒有就報錯，不猜專案。',
-            '- searchTickets 的 project 必填（同上取 LTJ_PROJECT）；沒有「不帶就是全部」。' +
-              '唯一跨專案是 mine=assignee|creator|watcher，且跨專案時不能再帶任何其他篩選。',
-            '- 清單用 limit + cursor 分頁，limit 上限 100；type/status 等可傳陣列多值。',
+            '- searchTickets 的 project 必填（同上取 LTJ_PROJECT），沒有「不帶就是全部」；' +
+              '唯一跨專案是 mine=assignee|creator|watcher，此時一般篩選全不可帶。',
+            // GH-265 的 instructions 預算仍然成立（本行是換掉舊的「type/status 等可傳陣列多值」那一句，
+            // 不是另開一行）：新增的能力只講「有哪些運算子」，細節在工具 schema 裡。
+            '- 清單用 limit+cursor 分頁（上限 100）；篩選每維度可多值且有 XNot，' +
+              'title/description 另有 XContains/XNotContains，另有 overdue、id（≤' + TICKET_ID_FILTER_MAX + '）。',
             '- activity 用 kind=user|system 過濾，不帶 kind 是全部。'
           ].join('\n')
         }

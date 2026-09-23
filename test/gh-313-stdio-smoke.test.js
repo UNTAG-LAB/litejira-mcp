@@ -137,9 +137,9 @@ test('GH-313 stdio smoke：唯讀通路（4 讀取工具 / 6 資源 / 4 提示�
   assert.strictEqual(init.serverInfo.version, require('../package.json').version);
   assert.ok(init.capabilities.tools && init.capabilities.resources && init.capabilities.prompts);
 
-  // ── 清單：18 工具 / 4 固定資源 + 2 模板 / 4 提示 ──
+  // ── 清單：20 工具（GH-317 加了 getAttachments / uploadAttachment）/ 4 固定資源 + 2 模板 / 4 提示 ──
   const tools = okResult(await client.call('tools/list'), 'tools/list').tools;
-  assert.strictEqual(tools.length, 18, '工具數：' + tools.map((x) => x.name).join(', '));
+  assert.strictEqual(tools.length, 20, '工具數：' + tools.map((x) => x.name).join(', '));
 
   const resources = okResult(await client.call('resources/list'), 'resources/list').resources;
   const templates = okResult(await client.call('resources/templates/list'), 'templates').resourceTemplates;

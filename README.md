@@ -93,6 +93,9 @@ LTJ_MCP_ENABLE_WRITES=true
 > `LTJ_API_URL` 是正式站 `https://litejira.untaglab.com`（自架另一套的人才需要改）。
 > 只接受 `https://`，唯一例外是本機 loopback 的 `http://localhost`（開發用）。
 >
+> 可選：`LTJ_MCP_MAX_UPLOAD_BYTES=<位元組>` 調整附件上傳上限（預設 25 MiB，天花板 100 MiB）。
+> 不設就用預設；設成範圍外的值會在啟動時明確報錯，不會靜默退回預設。
+>
 > 權杖只存在你電腦上、不進 git。離職或不用了，找 admin 在 webapp 撤銷。
 
 ---
@@ -185,11 +188,56 @@ LTJ_PROJECT=<你的專案 key>
 | 「把 BUG-530 狀態改成自測中」 | 改狀態（依工作流自動轉派） | ✅（說動作名稱，例如「送 alpha 測試」；退回類動作與「main不受影響」要附原因） |
 | 「把這張 BUG 掛到 EPIC-12 底下」 | 設定 / 解除父子關聯 | ✅ |
 | 「附上這份設計稿連結」 / 「移掉那個附件」 | 附件增刪 | ✅ |
+| 「BUG-530 上的附件給我看」 | 列附件，附可直接開的下載連結 | ✅（見下「附件怎麼拿、怎麼放」） |
+| 「把這份 log 檔傳上去」 | 上傳本機檔案為附件 | ✅（給檔案路徑；不收網址，也不會把內容塞進對話） |
 | 「幫我追蹤 / 取消追蹤這張」 | 設定關注（要講明追或不追） | ✅ |
 | 「把 BUG-530 改成 REQ」 | 轉換工單類型 | ✅（IDEA / STD 不能當目標） |
 | 「留言說明並同時改狀態，一次完成」 | 先改狀態、再留言（兩步，非原子） | ✅（中途失敗會明講哪一步沒成，不會自動還原） |
 | 「把 BUG-530 的到期日改成下週五」 | 改單一欄位 | ✅（改狀態除外：那要說動作名稱，走一般流轉） |
 | 「這 20 張一起送測 / 一起轉派 / 一起改版本」 | 批量操作（一次最多 100 張） | ✅（會回成功與失敗兩份清單） |
+
+### 附件怎麼拿、怎麼放
+
+附件有四個工具，兩個舊的（貼連結 / 刪除）與兩個新的（列出取檔連結 / 上傳檔案）：
+
+| 你說 | 工具 | 結果 |
+|------|------|------|
+| 「BUG-530 有哪些附件？連結給我」 | `litejira.getAttachments` | 每筆附件的**原有欄位全部保留**，另外多一組 `links` |
+| 「把 `./crash.log` 傳上去」 | `litejira.uploadAttachment` | 讀本機檔案、串流上傳，回新建的那筆附件（同樣附上 `links`）與位元組數 |
+| 「附上這個雲端硬碟連結」 | `litejira.attachLink` | 只存一條 URL（不搬檔案） |
+| 「移掉那個附件」 | `litejira.removeAttachment` | 依附件 UUID 刪除 |
+
+`getAttachments` 讀的是附件專屬端點 `GET /api/v1/tickets/{ticket}/attachments`
+（工單本體沒有附件欄）。它**一次回完整集合、不分頁**（每單附件數是個位數），
+所以沒有 `limit` / `cursor`；排序穩定但**不代表使用者看到的順序**，要指名單筆請用 `id`。
+
+`getAttachments` 每筆附件多出來的 `links`：
+
+| 欄位 | 是什麼 | 怎麼用 |
+|------|--------|--------|
+| `links.legacy` | 舊的 `url` 欄位原樣回著（`attachLink` 存進去的那條外部連結） | 沒有變，舊流程照用 |
+| `links.web` | `/api/web/attachments/{id}/content` | **這條是給人的**：用已登入 LiteJira 的瀏覽器開即可，可以直接貼進聊天室 |
+| `links.api` | `/api/v1/attachments/{id}/content` | 給程式的：要自己帶 `Authorization: Bearer <PAT>`；回的是二進位內容（也可能是導向舊儲存體的 302） |
+
+> **兩條 URL 裡都沒有權杖。** `links.web` 靠瀏覽器既有登入態，`links.api` 靠 header ——
+> 所以 `links.api` 不是「點一下就開」的連結，貼給別人只會拿到 401。
+>
+> 這個 MCP server **不會代你下載附件內容**：它不把二進位塞進 JSON 回應（會炸掉上下文），
+> 也不會帶著你的 Bearer 去跟隨 redirect。要取檔請拿上面的 URL 自己抓。
+
+上傳的規矩（跟其他寫入工具不太一樣，值得看一眼）：
+
+- **只收本機檔案路徑**，不收網址。要附外部連結請用 `attachLink`；要傳遠端檔案請自己先下載下來。
+- 使用本機 stdio 信任範圍：工具可讀取執行帳號能讀取的檔案，呼叫端應只提交使用者授權上傳的路徑。
+- 上傳期限預設 5 分鐘，可用 `timeoutMs` 調整，最多 10 分鐘；一般 JSON 查詢仍採原本的 20 秒期限。
+- 只收**普通檔案**：目錄、FIFO、socket、裝置節點、0 byte 檔、超過上限的檔案，全部在送出前就被擋下。
+- 檔案是**串流**送出的（一次一塊），不會整個讀進記憶體，也不會出現在對話裡。
+  上限預設 25 MiB，可用 `LTJ_MCP_MAX_UPLOAD_BYTES` 調整（天花板 100 MiB）。
+- 檔名與 MIME 會照原樣帶上（檔名放在 URL 的 `name`，MIME 放 `Content-Type`）。
+- **這個端點不收 `Idempotency-Key`**（後端回 422：串流上傳沒辦法在送出前算出請求指紋）。
+  所以上傳逾時或斷線時**不會自動重試**——AI 會先用 `getAttachments` 對帳，確認那筆在不在，再問你要不要重傳。
+  自己動手重送就是真的再傳一份，會留下兩筆同名附件。
+- 跟其他寫入工具一樣要 `LTJ_MCP_ENABLE_WRITES=true`。
 
 ### 搜尋能篩到多細
 
@@ -239,6 +287,11 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | 大量 `invalid_response`（不是 JSON） | `LTJ_API_URL` 可能還指著舊的 Apps Script 後端。3.x 只連 `https://litejira.untaglab.com` 這類 2.0 REST 站 |
 | 寫入回逾時 / 5xx / `in_progress`，不知道成功沒 | **先讀工單現況**再說。要重送就用同一把 idempotencyKey ＋ 完全相同的輸入，且在 24 小時內；不要換新 key |
 | `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |
+| 上傳說 `file_too_large` | 檔案超過上限（預設 25 MiB）。調 `LTJ_MCP_MAX_UPLOAD_BYTES`（天花板 100 MiB），或改附連結 |
+| 上傳說 `file_not_regular` / `file_empty` | 路徑指到的是目錄或 0 byte 檔。確認路徑，或等檔案寫完再傳 |
+| 上傳說 `file_unreadable` | 路徑不存在或沒有讀取權限（server 是在**你這台機器**上讀檔） |
+| 上傳回逾時 / 斷線，不知道傳上去沒 | 這個端點沒有冪等鍵，**不要直接重送**。先讓 AI 用 `litejira.getAttachments` 對帳，確認沒有才重傳 |
+| 附件連結點開是 401 | 你拿到的是 `links.api`（要帶 Bearer）。要在瀏覽器開請用 `links.web` |
 | 啟動拋 HTTP 401 + HTML（不是 JSON） | server 端 API 部署存取設定漂移，不是你的問題 → 找 admin |
 | 多開 session 時連不上 | 改用全域安裝（`npm i -g`），不要用 npx |
 

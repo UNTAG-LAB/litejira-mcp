@@ -38,9 +38,10 @@ const PACK4_TOOLS = [
   ['litejira.batchSetField', { tickets: ['BUG-481'], field: 'priority', value: 'P1-高' }]
 ];
 
-// ── tools/list：18 個工具全部公告，沒有任何 pending ──
+// ── tools/list：20 個工具全部公告，沒有任何 pending ──
+// （GH-317 起多了 getAttachments / uploadAttachment 兩支附件工具。）
 
-test('tools/list 回全部 18 個工具，第四包的 5 個都在', async function () {
+test('tools/list 回全部 20 個工具，第四包的 5 個都在', async function () {
   const names = listTools().map(function (t) { return t.name; }).sort();
   assert.deepStrictEqual(names, [
     'litejira.addComment',
@@ -51,6 +52,7 @@ test('tools/list 回全部 18 個工具，第四包的 5 個都在', async funct
     'litejira.convertTicketType',
     'litejira.createTicket',
     'litejira.getActivityLog',
+    'litejira.getAttachments',
     'litejira.getTransitions',
     'litejira.linkTickets',
     'litejira.listComments',
@@ -60,9 +62,10 @@ test('tools/list 回全部 18 個工具，第四包的 5 個都在', async funct
     'litejira.searchTickets',
     'litejira.toggleWatch',
     'litejira.transitionTicket',
-    'litejira.updateField'
+    'litejira.updateField',
+    'litejira.uploadAttachment'
   ]);
-  assert.strictEqual(names.length, 18);
+  assert.strictEqual(names.length, 20);
 });
 
 test('第四包的 5 個工具都要求 idempotencyKey，且不再宣稱未接線', async function () {
@@ -926,6 +929,7 @@ test('傳輸層：PATCH 一般欄位端點不收 reason / status / 舊欄位名�
 test('initialize 的 instructions 不再宣稱有工具未接線，且講明批次的部分成功', async function () {
   const response = await rpc('initialize', {}, cfg(), neverFetch());
   const text = response.result.instructions;
+  // GH-317：預算維持 1000（附件那一行擠進既有額度，細節在工具 schema）。
   assert.ok(text.length <= 1000, 'instructions 長度 ' + text.length + ' 超出預算');
   assert.ok(!/未接線|尚未接/.test(text), 'instructions 不得再說有工具未接線');
   assert.match(text, /failed/);

@@ -1,5 +1,7 @@
 'use strict';
 
+const fsp = require('fs').promises;
+
 // GH-257：對外 API v1 傳輸層。
 // 範圍：action → REST 映射、Bearer、Idempotency-Key、{ data } 信封拆一層、
 // 整趟 deadline（fetch + 讀 body 合計）、Abort 清理、禁止跟隨 redirect、URL 合法性。
@@ -274,6 +276,22 @@ const ACTION_MAP = Object.freeze({
       includeSystemEvents: 'v1 改用 kind=user|system 單選；不帶 kind 才是全部。includeSystemEvents 無對應參數，請改帶 kind'
     }),
     contractRef: 'GET /api/v1/tickets/{ticket}/activity'
+  }),
+
+  // 附件清單。**回完整集合、不分頁**（每單上限個位數，與關注者同級），故無 limit / cursor / order。
+  // 回應 data 是 { items: [...] } 物件，不是裸陣列；工單本體（GET /tickets/{ticket}）**沒有**附件欄，
+  // 要附件只有這一條路由。排序有決定性但不承諾是「使用者的順序」。
+  listAttachments: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/tickets/{ticket}/attachments',
+    pathParams: Object.freeze(['ticket']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    rejected: Object.freeze({
+      limit: '附件不分頁：這條路由一次回完整集合（每單上限個位數），沒有 limit / cursor / order',
+      cursor: '附件不分頁：這條路由一次回完整集合（每單上限個位數），沒有 limit / cursor / order',
+      order: '附件不分頁，且排序不承諾是「使用者的順序」；沒有 order 參數'
+    }),
+    contractRef: 'GET /api/v1/tickets/{ticket}/attachments'
   }),
 
   // 可用流轉動作。無任何 query；回應 data 是物件（含 actions 等欄位），不是陣列。
@@ -1163,6 +1181,262 @@ function assertHttpUrl_(key, value) {
   }
 }
 
+// ── GH-317：附件內容（下載入口 URL）與二進位上傳 ────────────────────────────
+//
+// 這兩條路由與 ACTION_MAP 裡的 JSON 路由是不同物種，所以刻意不塞進那張表：
+//   下載   GET  /api/v1/attachments/{id}/content     → binary（或 legacy 302），不是 { data }
+//   上傳   POST /api/v1/tickets/{ticket}/attachments/upload?name=ENCODED_FILENAME
+//          → body 是 raw bytes、Content-Type 是檔案實際 MIME，沒有 multipart、沒有 JSON
+// 把它們混進 buildRequest 會讓「所有請求都是 JSON 信封」這個不變式破掉。
+//
+// 🔴 上傳**不帶 Idempotency-Key**：後端收到會回 422。
+// 理由是串流上傳無法在送出前先 hash 內容，server 端算不出可比對的請求指紋。
+// 因此上傳的「結果不明」沒有去重可依靠：一律先列附件對帳，不自動重試（見 UPLOAD_UNKNOWN_OUTCOME）。
+const ATTACHMENT_CONTENT_PATH = '/attachments/{attachmentId}/content';
+const ATTACHMENT_UPLOAD_PATH = '/tickets/{ticket}/attachments/upload';
+// 瀏覽器登入態可直接開的取檔路徑（不在 /api/v1 底下，走 web session 而非 PAT）。
+const WEB_ATTACHMENT_CONTENT_PATH = '/api/web/attachments/{attachmentId}/content';
+const ATTACHMENT_DOWNLOAD_CONTRACT = 'GET /api/v1/attachments/{attachmentId}/content';
+const ATTACHMENT_UPLOAD_CONTRACT = 'POST /api/v1/tickets/{ticket}/attachments/upload?name=ENCODED_FILENAME';
+// 預設 25 MiB、可調上限 100 MiB。上界是守門不是禮貌：沒有上界時一個筆誤的路徑
+//（例如指到一個 40 GB 的映像檔）會把整條連線與記憶體拖垮。
+const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const UPLOAD_BYTES_CEILING = 100 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES = 64 * 1024;
+// RFC 9110 的 media-type：type/subtype，兩邊都是 token。不收參數（; charset=…）也不收空白 ——
+// header 值只要能塞進 CR/LF 或引號就是注入面，這裡一律當面擋下。
+const MIME_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+\/[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+const UPLOAD_UNKNOWN_OUTCOME =
+  '上傳結果不明（逾時 / 連線中斷 / 5xx）。**不要自動重試**：本端點不接受 Idempotency-Key（後端回 422），' +
+  '重送就是真的再上傳一次，會留下兩筆同名附件。請先列出該工單的附件對帳，確認這一筆在不在，再決定要不要重送。';
+
+// 取 API 的 origin（scheme + host + port）。base URL 已由 normalizeBaseUrl 驗過
+//（https 或明確 loopback、無帳密、無 query/fragment），所以這裡拿到的 origin 沿用同一套規則。
+function apiOrigin(baseUrl) {
+  return new URL(normalizeBaseUrl(baseUrl)).origin;
+}
+
+function assertAttachmentId_(attachmentId) {
+  if (typeof attachmentId !== 'string' || attachmentId.trim() === '') {
+    throw invalidArg_('attachmentId 必須是非空字串（附件 UUID）', { param: 'attachmentId' });
+  }
+  return attachmentId;
+}
+
+// 既有附件的兩個取檔入口。回傳的 URL 內**永遠不含 PAT**：
+// api 這一條靠 Authorization header，web 那一條靠瀏覽器既有登入態。
+// id 一律 encodeURIComponent —— 附件 id 是外部資料，未 escape 就拼進路徑等於開放路徑穿越。
+function attachmentContentUrls(baseUrl, attachmentId) {
+  const id = encodeURIComponent(assertAttachmentId_(attachmentId));
+  const base = normalizeBaseUrl(baseUrl);
+  // web 那條與 /api/v1 是同一個掛載點底下的兄弟路徑，所以要從 base 去掉 /api/v1 再接，
+  // 不能直接用 origin —— 站台掛在子路徑（https://host/litejira）時，用 origin 會掉了那層前綴。
+  const mount = base.slice(0, base.length - API_BASE_PATH.length);
+  return {
+    api: base + ATTACHMENT_CONTENT_PATH.replace('{attachmentId}', id),
+    web: mount + WEB_ATTACHMENT_CONTENT_PATH.replace('{attachmentId}', id)
+  };
+}
+
+// 檔名 → query 的 name 值。擋掉路徑分隔符與控制字元：
+// 檔名會被後端當顯示名與下載檔名用，放行 "../" 或 CR/LF 等於把上游的問題往下游送。
+function assertUploadFilename_(name) {
+  if (typeof name !== 'string' || name.trim() === '') {
+    throw invalidArg_('附件檔名必須是非空字串', { param: 'name' });
+  }
+  if (name.length > 255) {
+    throw invalidArg_('附件檔名過長（上限 255 字元）', { param: 'name' });
+  }
+  if (/[\\/]/.test(name) || name === '.' || name === '..') {
+    throw invalidArg_('附件檔名不可含路徑分隔符，也不可是 . 或 ..（請只給檔名，不是路徑）', { param: 'name' });
+  }
+  for (let i = 0; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) {
+      throw invalidArg_('附件檔名不可含控制字元', { param: 'name' });
+    }
+  }
+  return name;
+}
+
+function assertUploadMime_(contentType) {
+  if (typeof contentType !== 'string' || !MIME_PATTERN.test(contentType)) {
+    throw invalidArg_('contentType 必須是 type/subtype 形式的 MIME（不接受參數、空白或控制字元）',
+      { param: 'contentType' });
+  }
+  return contentType;
+}
+
+function normalizeMaxUploadBytes_(value) {
+  if (value === undefined || value === null) return DEFAULT_MAX_UPLOAD_BYTES;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0 || value > UPLOAD_BYTES_CEILING) {
+    throw invalidArg_('maxBytes 必須是 1 到 ' + UPLOAD_BYTES_CEILING + ' 之間的整數位元組',
+      { param: 'maxBytes', ceiling: UPLOAD_BYTES_CEILING });
+  }
+  return value;
+}
+
+// 組出上傳請求的 method / url / headers（不含 body，body 由 uploadAttachment 串流帶上）。
+// 測試以此驗 URL escape、header 內容與「絕不出現 Idempotency-Key / PAT 在 URL」。
+function buildUploadRequest(options) {
+  const opts = options || {};
+  const base = normalizeBaseUrl(opts.baseUrl);
+  const ticket = opts.ticket;
+  if (typeof ticket !== 'string' || !TICKET_REF_PATTERN.test(ticket)) {
+    throw invalidArg_('ticket 必須是工單參照（UUID、公開 key 如 BUG-481，或純數字 key）', { param: 'ticket' });
+  }
+  const name = assertUploadFilename_(opts.name);
+  const contentType = assertUploadMime_(opts.contentType);
+  const token = opts.token;
+  if (typeof token !== 'string' || token === '') {
+    throw new LiteJiraTransportError('missing_token', '缺少 API token（LTJ_API_TOKEN）');
+  }
+  if (opts.idempotencyKey !== undefined && opts.idempotencyKey !== null) {
+    throw invalidArg_('附件上傳不接受 Idempotency-Key（後端回 422：串流無法先算請求指紋）。' +
+      UPLOAD_UNKNOWN_OUTCOME, { param: 'idempotencyKey' });
+  }
+  const path = ATTACHMENT_UPLOAD_PATH.replace('{ticket}', encodeURIComponent(ticket));
+  // 用 encodeURIComponent 而不是 URLSearchParams：後者會把空白編成 '+'（form-urlencoded 的規則），
+  // 只有「照 form 規則解」的 parser 才還原得回空白；照 decodeURIComponent 解的會拿到字面的 '+'，
+  // 於是「季報 表.pdf」變成「季報+表.pdf」。%20 兩種 parser 都解得對。
+  const encodedName = encodeURIComponent(name);
+  const headers = {
+    Accept: 'application/json',
+    Authorization: 'Bearer ' + token,
+    'Content-Type': contentType
+  };
+  if (typeof opts.size === 'number') headers['Content-Length'] = String(opts.size);
+  return {
+    method: 'POST',
+    url: base + path + '?name=' + encodedName,
+    headers: headers,
+    contractRef: ATTACHMENT_UPLOAD_CONTRACT
+  };
+}
+
+// 本機檔案守門：只收「普通檔案」。目錄 / FIFO / socket / 裝置節點一律拒絕 ——
+// 對 FIFO 做串流會永遠讀不完（沒有 EOF），對裝置節點會讀出無窮位元組。
+// 空檔也拒絕：0 byte 的附件對閱讀者沒有意義，而且多半是「路徑打錯 / 檔案還沒寫完」的徵兆。
+async function statUploadFile_(filePath, maxBytes) {
+  if (typeof filePath !== 'string' || filePath.trim() === '') {
+    throw invalidArg_('filePath 必須是非空字串（本機檔案路徑）', { param: 'filePath' });
+  }
+  let stats;
+  try {
+    stats = await fsp.stat(filePath);
+  } catch (err) {
+    // err.message 含完整路徑，會被原樣回給呼叫端；只轉述 errno，不轉述系統訊息。
+    throw new LiteJiraTransportError('file_unreadable',
+      '無法讀取本機檔案（' + (err && err.code ? err.code : 'unknown') + '）；請確認路徑存在且可讀',
+      { param: 'filePath', errno: err && err.code ? err.code : null });
+  }
+  if (!stats.isFile()) {
+    throw new LiteJiraTransportError('file_not_regular',
+      '只接受普通檔案：目錄、FIFO、socket 與裝置節點都不會被上傳（它們沒有可預期的長度）',
+      { param: 'filePath' });
+  }
+  if (stats.size === 0) {
+    throw new LiteJiraTransportError('file_empty',
+      '檔案是 0 byte，拒絕上傳（多半是路徑打錯或檔案尚未寫完）', { param: 'filePath' });
+  }
+  if (stats.size > maxBytes) {
+    throw new LiteJiraTransportError('file_too_large',
+      '檔案 ' + stats.size + ' byte 超過上限 ' + maxBytes + ' byte',
+      { param: 'filePath', size: stats.size, maxBytes: maxBytes });
+  }
+  return stats;
+}
+
+// 串流讀檔：一次一塊，不把整個檔案讀進記憶體，並在串流途中再守一次上限
+//（stat 之後檔案仍可能被追寫；只信 stat 等於把上限交給別人決定）。
+async function* uploadChunks_(filePath, maxBytes) {
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(UPLOAD_CHUNK_BYTES);
+    let sent = 0;
+    for (;;) {
+      const read = await handle.read(buf, 0, UPLOAD_CHUNK_BYTES, null);
+      if (read.bytesRead === 0) return;
+      sent += read.bytesRead;
+      if (sent > maxBytes) {
+        throw new LiteJiraTransportError('file_too_large',
+          '檔案在上傳途中超過上限 ' + maxBytes + ' byte（讀到 ' + sent + ' byte 時中止）',
+          { param: 'filePath', maxBytes: maxBytes });
+      }
+      // 複製一份再交出去：buf 會被下一輪覆寫，直接交出去會讓已排隊的 chunk 內容錯亂。
+      yield Buffer.from(buf.subarray(0, read.bytesRead));
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+// 上傳單一檔案。與 callV1 共用 deadline / redirect 政策 / 回應消化，差別只在 body 是 raw bytes。
+// 不做任何重試：本端點沒有冪等鍵，重試＝真的再傳一次。
+async function uploadAttachment(options) {
+  const opts = options || {};
+  const fetchFn = opts.fetch || globalThis.fetch;
+  if (typeof fetchFn !== 'function') {
+    throw new LiteJiraTransportError('fetch_unavailable', '目前 runtime 沒有 fetch；請使用 Node 18+ 或注入 fetch');
+  }
+  const timeoutMs = normalizeTimeoutMs_(opts.timeoutMs);
+  const maxBytes = normalizeMaxUploadBytes_(opts.maxBytes);
+  const external = opts.signal;
+  if (external && external.aborted) {
+    throw new LiteJiraTransportError('aborted', '呼叫端已取消請求（未送出）');
+  }
+
+  const stats = await statUploadFile_(opts.filePath, maxBytes);
+  const request = buildUploadRequest({
+    baseUrl: opts.baseUrl,
+    token: opts.token,
+    ticket: opts.ticket,
+    name: opts.name,
+    contentType: opts.contentType,
+    idempotencyKey: opts.idempotencyKey,
+    size: stats.size
+  });
+
+  const controller = new AbortController();
+  const deadline = createDeadline_(timeoutMs, controller);
+  let externallyAborted = false;
+  const onExternalAbort = () => {
+    externallyAborted = true;
+    try { controller.abort(); } catch (err) { /* noop */ }
+  };
+  if (external) external.addEventListener('abort', onExternalAbort);
+
+  const classify_ = makeClassifier_(deadline, timeoutMs, () => externallyAborted);
+
+  try {
+    let response;
+    try {
+      response = await raceDeadline_(
+        fetchFn(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: uploadChunks_(opts.filePath, maxBytes),
+          // async iterable body 在 undici 需要明講半雙工；沒帶會直接被 fetch 拒絕。
+          duplex: 'half',
+          // 不跟隨 redirect：跟了會把 Authorization 與整份檔案內容帶去未經驗證的目的地。
+          redirect: 'manual',
+          signal: controller.signal
+        }),
+        deadline,
+        consumeLate_
+      );
+    } catch (err) {
+      throw classify_(err);
+    }
+    const result = await consumeResponse_(response, deadline, classify_,
+      { emptyBody: false, contractRef: request.contractRef });
+    return { ok: true, status: result.status, data: result.data, size: stats.size, name: opts.name };
+  } finally {
+    deadline.clear();
+    if (external) external.removeEventListener('abort', onExternalAbort);
+  }
+}
+
 // 組出完整請求（不送）。測試以此驗 method / path / query / body / headers。
 function buildRequest(options) {
   const opts = options || {};
@@ -1335,18 +1609,7 @@ async function callV1(options) {
   };
   if (external) external.addEventListener('abort', onExternalAbort);
 
-  const classify_ = (err) => {
-    if (err instanceof LiteJiraTransportError) return err;
-    if (err instanceof LiteJiraApiError) return err;
-    if (deadline.expired) {
-      return new LiteJiraTransportError('timeout',
-        '請求逾時（' + timeoutMs + 'ms，含讀取回應內容）', { timeoutMs: timeoutMs });
-    }
-    if (externallyAborted) return new LiteJiraTransportError('aborted', '呼叫端已取消請求');
-    // 原始 err.message 可能夾帶 URL、header、body 片段；一律不轉述。
-    return new LiteJiraTransportError('network_error',
-      '連線失敗（原始錯誤訊息不轉述，以免夾帶憑證或他人資料）');
-  };
+  const classify_ = makeClassifier_(deadline, timeoutMs, () => externallyAborted);
 
   try {
     let response;
@@ -1367,77 +1630,109 @@ async function callV1(options) {
       throw classify_(err);
     }
 
-    if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
-      throw new LiteJiraTransportError('invalid_response', 'fetch 回傳的不是 Response');
-    }
-
-    const status = response.status;
-    if (status >= 300 && status < 400) {
-      throw new LiteJiraTransportError('redirect_blocked',
-        'API 回了 HTTP ' + status + ' redirect；為避免 Bearer 外洩不跟隨，請改設正確的 base URL',
-        { status: status });
-    }
-
-    let text;
-    try {
-      text = await raceDeadline_(response.text(), deadline, null);
-    } catch (err) {
-      throw classify_(err);
-    }
-
-    let payload = null;
-    let parsed = false;
-    if (typeof text === 'string' && text.trim() !== '') {
-      try {
-        payload = JSON.parse(text);
-        parsed = true;
-      } catch (err) {
-        // 不附 body 片段：HTML 錯誤頁可能夾帶 session / 他人資料，脫敏無法保證乾淨。
-        throw new LiteJiraTransportError('invalid_response',
-          'API 回傳非 JSON（HTTP ' + status + '；內容不轉述）', { status: status });
-      }
-    }
-
-    if (status >= 200 && status < 300) {
-      // 204 無 body：只有契約明講如此的路由（emptyBody）才放行。
-      // 不放寬到「任何 2xx 空 body」——那會讓其他端點的空回應偷偷當成功過關。
-      const empty = !parsed;
-      if (status === 204 && request.route.emptyBody && empty) {
-        return { ok: true, status: status, data: null, noContent: true };
-      }
-      if (status === 204) {
-        throw new LiteJiraTransportError('invalid_response',
-          request.route.emptyBody
-            ? 'HTTP 204 卻帶了 body，與契約不符（' + request.route.contractRef + '；內容不轉述）'
-            : 'HTTP 204 不在此端點的契約內（' + request.route.contractRef + '）',
-          { status: status });
-      }
-      if (!parsed || !isDataEnvelope_(payload)) {
-        throw new LiteJiraTransportError('invalid_response',
-          'HTTP ' + status + ' 但回應不是 { data } 契約形狀（內容不轉述）', { status: status });
-      }
-      // 拆掉唯一一層信封：回傳的 data 就是契約裡的 data，呼叫端不會再看到 data.data。
-      return { ok: true, status: status, data: payload.data };
-    }
-
-    if (isErrorEnvelope_(payload)) {
-      // error.code / message / details 原樣保存，狀態碼另外附上供記錄，不用來反推語意。
-      throw new LiteJiraApiError(status, payload.error.code, payload.error.message, payload.error.details);
-    }
-
-    throw new LiteJiraTransportError('invalid_response',
-      'HTTP ' + status + ' 但回應不是 { error: { code, message } } 契約形狀（內容不轉述）',
-      { status: status });
+    return await consumeResponse_(response, deadline, classify_, request.route);
   } finally {
     deadline.clear();
     if (external) external.removeEventListener('abort', onExternalAbort);
   }
 }
 
+// 例外分類。外部來源的 err.message 一律不轉述（可能夾帶憑證、URL 或他人資料），
+// 只回固定碼＋固定文案；逾時與「呼叫端取消」要與一般連線失敗分開，善後方式不同。
+function makeClassifier_(deadline, timeoutMs, wasExternallyAborted) {
+  return function (err) {
+    if (err instanceof LiteJiraTransportError) return err;
+    if (err instanceof LiteJiraApiError) return err;
+    if (deadline.expired) {
+      return new LiteJiraTransportError('timeout',
+        '請求逾時（' + timeoutMs + 'ms，含讀取回應內容）', { timeoutMs: timeoutMs });
+    }
+    if (wasExternallyAborted()) return new LiteJiraTransportError('aborted', '呼叫端已取消請求');
+    // 原始 err.message 可能夾帶 URL、header、body 片段；一律不轉述。
+    return new LiteJiraTransportError('network_error',
+      '連線失敗（原始錯誤訊息不轉述，以免夾帶憑證或他人資料）');
+  };
+}
+
+// 回應消化：JSON 路由（callV1）與附件上傳共用同一套 redirect / 信封 / 脫敏政策。
+// route 只需要 { emptyBody, contractRef } 兩個欄位。
+async function consumeResponse_(response, deadline, classify_, route) {
+  if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
+      throw new LiteJiraTransportError('invalid_response', 'fetch 回傳的不是 Response');
+    }
+
+  const status = response.status;
+  if (status >= 300 && status < 400) {
+    throw new LiteJiraTransportError('redirect_blocked',
+      'API 回了 HTTP ' + status + ' redirect；為避免 Bearer 外洩不跟隨，請改設正確的 base URL',
+      { status: status });
+  }
+
+  let text;
+  try {
+    text = await raceDeadline_(response.text(), deadline, null);
+  } catch (err) {
+    throw classify_(err);
+  }
+
+  let payload = null;
+  let parsed = false;
+  if (typeof text === 'string' && text.trim() !== '') {
+    try {
+      payload = JSON.parse(text);
+      parsed = true;
+    } catch (err) {
+      // 不附 body 片段：HTML 錯誤頁可能夾帶 session / 他人資料，脫敏無法保證乾淨。
+      throw new LiteJiraTransportError('invalid_response',
+        'API 回傳非 JSON（HTTP ' + status + '；內容不轉述）', { status: status });
+    }
+  }
+
+  if (status >= 200 && status < 300) {
+    // 204 無 body：只有契約明講如此的路由（emptyBody）才放行。
+    // 不放寬到「任何 2xx 空 body」——那會讓其他端點的空回應偷偷當成功過關。
+    const empty = !parsed;
+    if (status === 204 && route.emptyBody && empty) {
+      return { ok: true, status: status, data: null, noContent: true };
+    }
+    if (status === 204) {
+      throw new LiteJiraTransportError('invalid_response',
+        route.emptyBody
+          ? 'HTTP 204 卻帶了 body，與契約不符（' + route.contractRef + '；內容不轉述）'
+          : 'HTTP 204 不在此端點的契約內（' + route.contractRef + '）',
+        { status: status });
+    }
+    if (!parsed || !isDataEnvelope_(payload)) {
+      throw new LiteJiraTransportError('invalid_response',
+        'HTTP ' + status + ' 但回應不是 { data } 契約形狀（內容不轉述）', { status: status });
+    }
+    // 拆掉唯一一層信封：回傳的 data 就是契約裡的 data，呼叫端不會再看到 data.data。
+    return { ok: true, status: status, data: payload.data };
+  }
+
+  if (isErrorEnvelope_(payload)) {
+    // error.code / message / details 原樣保存，狀態碼另外附上供記錄，不用來反推語意。
+    throw new LiteJiraApiError(status, payload.error.code, payload.error.message, payload.error.details);
+  }
+
+  throw new LiteJiraTransportError('invalid_response',
+    'HTTP ' + status + ' 但回應不是 { error: { code, message } } 契約形狀（內容不轉述）',
+    { status: status });
+}
+
 module.exports = {
   ACTION_MAP,
   ACTIVITY_KIND_VALUES,
   API_BASE_PATH,
+  ATTACHMENT_DOWNLOAD_CONTRACT,
+  ATTACHMENT_UPLOAD_CONTRACT,
+  DEFAULT_MAX_UPLOAD_BYTES,
+  UPLOAD_BYTES_CEILING,
+  UPLOAD_UNKNOWN_OUTCOME,
+  apiOrigin,
+  attachmentContentUrls,
+  buildUploadRequest,
+  uploadAttachment,
   API_ERROR_STATUS,
   BATCH_FIELD_KEYS,
   BATCH_MAX_TICKETS,

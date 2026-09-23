@@ -8,8 +8,18 @@ const crypto = require('crypto');
 //（建單 / 留言 / 附件 ±/ 父子 / 轉派 / 轉型 / 關注 / 流轉）；
 // 第四包＝updateField / replyFeedback / 三個 batch，全部 18 個工具接線完畢。
 // 舊的 postLiteJiraApi（單一 POST + body token）在本檔案已完全不再使用，也沒有 legacy fallback。
+const path = require('path');
+
 const {
   callV1,
+  uploadAttachment,
+  attachmentContentUrls,
+  normalizeBaseUrl,
+  ATTACHMENT_DOWNLOAD_CONTRACT,
+  ATTACHMENT_UPLOAD_CONTRACT,
+  DEFAULT_MAX_UPLOAD_BYTES,
+  UPLOAD_BYTES_CEILING,
+  UPLOAD_UNKNOWN_OUTCOME,
   ACTIVITY_KIND_VALUES,
   BATCH_MAX_TICKETS,
   ENUM_FILTER_DIMS,
@@ -401,6 +411,85 @@ const TOOL_DEFS = [
       removedParams: {
         url: 'v1 依 attachmentId（UUID）刪除；url 不是 id，也不會拿 url 反查。' +
           '請先讀 litejira://ticket/{id} 的附件清單取該筆的 id'
+      }
+    }),
+  // ── GH-317：附件的「拿得到檔」與「放得上檔」──────────────────────────────
+  //
+  // 這兩個工具補的是舊版沒有的兩件事：既有附件的**實際取檔 URL**，以及**二進位上傳**。
+  // 舊版只有 attachLink（貼一條外部 URL）——助手拿到附件清單後沒有任何辦法把檔案看到，
+  // 也沒有辦法把本機產出的檔案放上去，只能回一句「請你自己去網頁開」。
+  tool('litejira.getAttachments',
+    'List a ticket\'s attachments WITH working download entry points (read-only; reads GET /tickets/{ticket}/attachments — the ticket detail itself carries NO attachments field, this dedicated route is the only source). The route returns the COMPLETE set, unpaginated (no limit/cursor/order), as data.items[]; ordering is deterministic but is NOT "the user\'s order". Each item keeps every original field verbatim (id, storage, name, url, uploadedBy, createdAt) — including the legacy "url" of link-type attachments, which is echoed as links.legacy. Each item additionally gets links.web (' +
+      'GET /api/web/attachments/{id}/content — open in a logged-in BROWSER, this is the one to hand to a human) and links.api (' +
+      ATTACHMENT_DOWNLOAD_CONTRACT + ' — requires an "Authorization: Bearer <PAT>" header; it returns raw bytes, or a 302 to legacy storage). NO URL EVER CONTAINS THE PAT, so links.web is safe to paste into chat; links.api is not a "click here" link. There is no download tool: this server never fetches attachment bytes and never follows a redirect with your Bearer attached — use the returned URLs with your own HTTP client. The response also carries an "upload" descriptor (method / url template / required headers, PAT value NOT included) for callers that want to upload over raw HTTP instead of litejira.uploadAttachment.',
+    'listAttachments', false, {
+      ticketId: P_TICKET_REF
+    }, ['ticketId'], {
+      readOnlyHint: true,
+      openWorldHint: true,
+      title: '列出工單附件（含取檔 URL）'
+    }, {
+      dispatch: 'getAttachments',
+      removedParams: {
+        download: '本工具不下載內容，只回 URL：伺服器不代抓檔案（會把 Bearer 帶去跟隨 redirect），' +
+          '也不會把二進位內容塞進 JSON 回應。請自行用回傳的 links.api / links.web 取檔。',
+        url: '本工具不接受 URL：它只讀工單自己的附件清單，不會去抓任意外部網址的檔案'
+      }
+    }),
+  tool('litejira.uploadAttachment',
+    'Upload a LOCAL FILE as a ticket attachment (' + ATTACHMENT_UPLOAD_CONTRACT + '). The request body is the RAW BYTES of the file — there is no multipart form and no JSON/base64 envelope, the filename travels in the URL-encoded "name" query and the real MIME type in Content-Type. Pass filePath (a path on the machine running this MCP server); the file is streamed in chunks under a hard size cap (default ' +
+      DEFAULT_MAX_UPLOAD_BYTES + ' bytes, ceiling ' + UPLOAD_BYTES_CEILING + ', see LTJ_MCP_MAX_UPLOAD_BYTES) and its bytes are NEVER echoed into the response. Only regular files are accepted: directories, FIFOs, sockets, device nodes, 0-byte files and oversized files are rejected locally before anything is sent. A URL is NOT a filePath — this tool will not fetch remote content; to attach an external link use litejira.attachLink instead. ' +
+      'THIS ENDPOINT TAKES NO Idempotency-Key (the server answers 422 — a streamed body cannot be fingerprinted before it is sent), so an unknown outcome CANNOT be deduped: do NOT auto-retry, call litejira.getAttachments first and check whether the file is already there. Requires LTJ_MCP_ENABLE_WRITES=true like every other write tool.',
+    'uploadAttachment', true, {
+      ticketId: P_TICKET_REF,
+      filePath: {
+        type: 'string',
+        description: '本機檔案路徑（執行本 MCP server 那台機器上的路徑）。相對路徑以 server 的工作目錄解析。' +
+          '只收普通檔案；不收 http(s):// 或 file:// 等 URL —— 本工具不會去下載任何遠端內容。',
+        minLength: 1
+      },
+      name: {
+        type: 'string',
+        description: '附件顯示名 / 下載檔名（省略 = 取 filePath 的檔名）。會以 URL-encode 後放進 ?name=；' +
+          '不可含路徑分隔符或控制字元。',
+        minLength: 1,
+        maxLength: 255
+      },
+      contentType: {
+        type: 'string',
+        description: '檔案實際 MIME（type/subtype，例 image/png、application/pdf）。' +
+          '省略 = 由副檔名推斷，推不出來則 application/octet-stream。不接受參數（; charset=…）。',
+        minLength: 3
+      },
+      timeoutMs: {
+        type: 'integer',
+        description: '整次上傳期限，預設 300000 毫秒（5 分鐘），可依檔案大小與網速調整，最多 10 分鐘。',
+        minimum: 1,
+        maximum: 600000
+      },
+      maxBytes: {
+        type: 'integer',
+        description: '本次上傳的位元組上限（省略 = 啟動設定的上限）。只能調低或在天花板內調高，' +
+          '超過 ' + UPLOAD_BYTES_CEILING + ' 一律拒絕。',
+        minimum: 1,
+        maximum: UPLOAD_BYTES_CEILING
+      }
+    }, ['ticketId', 'filePath'], {
+      // 上傳是「新增一筆」，不覆寫也不刪除；但它不是冪等的（同名可以重複上傳成兩筆），
+      // 所以 idempotentHint 明確標 false —— 標 true 會誘導主機自動重試。
+      idempotentHint: false,
+      openWorldHint: true,
+      title: '上傳本機檔案為工單附件'
+    }, {
+      dispatch: 'uploadAttachment',
+      removedParams: {
+        idempotencyKey: '此端點不接受 Idempotency-Key（後端回 422：串流上傳無法在送出前算出請求指紋）。' +
+          UPLOAD_UNKNOWN_OUTCOME,
+        url: '要附加外部連結請改用 litejira.attachLink；本工具只上傳本機檔案，不會去抓遠端 URL 的內容',
+        content: '本工具不收檔案內容（base64 / 字串都不收）：內容走串流，參數只給 filePath',
+        data: '本工具不收檔案內容（base64 / 字串都不收）：內容走串流，參數只給 filePath',
+        base64: '本工具不收 base64 內容：請把檔案寫到本機再給 filePath（避免把整個檔案塞進 JSON）',
+        kind: 'v1 的附件不分 kind；分類資訊請寫進 name'
       }
     }),
   tool('litejira.updateField',
@@ -843,8 +932,22 @@ function getConfigFromEnv(env) {
     // GH-257：專案層級端點（meta / versions / dashboard / workflow）的預設專案。
     // 非祕密設定；沒設也不猜，缺的時候明確報錯。
     project: runtimeEnv.LTJ_PROJECT || '',
-    enableWrites: String(runtimeEnv.LTJ_MCP_ENABLE_WRITES || '').toLowerCase() === 'true'
+    enableWrites: String(runtimeEnv.LTJ_MCP_ENABLE_WRITES || '').toLowerCase() === 'true',
+    // GH-317：附件上傳的位元組上限。非祕密設定；沒設用預設值，設了壞值一律當面報錯
+    //（靜默退回預設＝使用者以為調大了，實際沒有，然後撞一個看不懂的 file_too_large）。
+    maxUploadBytes: parseMaxUploadBytes_(runtimeEnv.LTJ_MCP_MAX_UPLOAD_BYTES)
   };
+}
+
+function parseMaxUploadBytes_(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return DEFAULT_MAX_UPLOAD_BYTES;
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n <= 0 || n > UPLOAD_BYTES_CEILING) {
+    throw mcpError_('CONFIG_ERROR',
+      'LTJ_MCP_MAX_UPLOAD_BYTES 必須是 1 到 ' + UPLOAD_BYTES_CEILING + ' 之間的整數位元組（收到：' + raw + '）',
+      { ceiling: UPLOAD_BYTES_CEILING });
+  }
+  return n;
 }
 
 // GH-257：尚未接上 v1 契約的工具一律在本機擋下。
@@ -875,6 +978,17 @@ async function callTool(name, args, config, fetchImpl) {
   // 所以整段自成一路，不套下面的單發流程。
   if (def.dispatch === 'replyFeedback') {
     return await replyFeedback_(input, cfg, fetchImpl);
+  }
+  // GH-317：附件兩個工具也自成一路 —— 一個要對讀回來的清單加工，
+  // 另一個的 body 是 raw bytes（走 uploadAttachment，不是 callV1 的 JSON 信封）。
+  if (def.dispatch === 'getAttachments') {
+    return await getAttachments_(input, cfg, fetchImpl);
+  }
+  if (def.dispatch === 'uploadAttachment') {
+    if (!(fetchImpl || globalThis.fetch)) {
+      throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
+    }
+    return await uploadAttachmentTool_(input, cfg, fetchImpl);
   }
   // 其餘工具都是單發；差別只在「哪一條路由」是由參數決定（updateField / batchSetField）還是固定的。
   const plan = def.dispatch
@@ -1289,6 +1403,203 @@ function replyErrorResult_(failed, completed, note) {
   };
 }
 
+// ── GH-317：附件取檔 URL 與二進位上傳 ──────────────────────────────────────
+//
+// 兩個認證途徑講死，因為「這條連結能不能貼給人」完全取決於它：
+//   web  → 瀏覽器既有登入態（session cookie）。URL 本身不含任何憑證，可以貼給人開。
+//   api  → Authorization: Bearer <PAT>。URL 本身一樣不含 PAT，但少了 header 就打不開，
+//          所以它不是「點一下就好」的連結，貼給人只會得到 401。
+// 兩條都由設定的 base URL 推導，沿用 normalizeBaseUrl 的 origin 規則（https 或明確 loopback）。
+const ATTACHMENT_AUTH = Object.freeze({
+  web: 'browser-session：用你已登入 LiteJira 的瀏覽器開啟即可；URL 內不含 PAT，可以貼給人。',
+  api: 'bearer-pat：必須自行帶 Authorization: Bearer <你的 PAT> 這個 header；' +
+    'URL 內不含 PAT，所以直接貼給人或貼進瀏覽器只會拿到 401。回應是二進位內容，也可能是導向舊儲存體的 302。'
+});
+
+// 副檔名 → MIME。刻意只列常見且不會猜錯的幾種；推不出來一律 application/octet-stream，
+// 不去讀檔頭做魔數判斷（猜錯 MIME 會讓瀏覽器用錯的方式渲染附件）。
+const MIME_BY_EXT = Object.freeze({
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf',
+  '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv', '.log': 'text/plain',
+  '.json': 'application/json', '.xml': 'application/xml', '.html': 'text/html',
+  '.zip': 'application/zip', '.gz': 'application/gzip', '.7z': 'application/x-7z-compressed',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.har': 'application/json', '.patch': 'text/x-diff', '.diff': 'text/x-diff'
+});
+const DEFAULT_UPLOAD_MIME = 'application/octet-stream';
+
+function guessMime_(filename) {
+  const ext = path.extname(String(filename || '')).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(MIME_BY_EXT, ext) ? MIME_BY_EXT[ext] : DEFAULT_UPLOAD_MIME;
+}
+
+// 單筆附件 → 原欄位 + links。原物件的每一個鍵都原樣保留（含 legacy 的 url），
+// 只**新增** links 這一個鍵：改名或丟棄舊欄位會讓既有的呼叫端無聲地壞掉。
+function enrichAttachment_(item, cfg) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  const out = Object.assign({}, item);
+  const legacy = typeof item.url === 'string' && item.url !== '' ? item.url : null;
+  const id = typeof item.id === 'string' && item.id !== '' ? item.id : null;
+  if (id === null) {
+    // 沒有 id 就組不出取檔 URL。回 null ＋ 講明原因，不回一條猜出來的路徑
+    //（猜錯的 URL 會讓呼叫端拿到 404 還以為是權限問題）。
+    out.links = { legacy: legacy, web: null, api: null,
+      unavailable: '這筆附件沒有 id，無法組出取檔 URL（只剩 links.legacy 可用）' };
+    return out;
+  }
+  const urls = attachmentContentUrls(cfg.apiUrl, id);
+  out.links = {
+    legacy: legacy,
+    web: urls.web,
+    webAuth: ATTACHMENT_AUTH.web,
+    api: urls.api,
+    apiAuth: ATTACHMENT_AUTH.api,
+    apiContract: ATTACHMENT_DOWNLOAD_CONTRACT
+  };
+  return out;
+}
+
+// 上傳端點的自述：給「想自己打 HTTP 而不是用本工具」的呼叫端。
+// headers 只描述**要放什麼**，PAT 的值永遠不在輸出裡。
+function uploadDescriptor_(cfg, ticketRef) {
+  // 用 buildUploadRequest 以外的路徑組 URL 會漂移；但它需要 token 與檔名，
+  // 而這裡要的是「沒有檔名的樣板」，沿用正規化基底，保留子路徑部署前綴。
+  const base = normalizeBaseUrl(cfg.apiUrl) +
+    '/tickets/' + encodeURIComponent(String(ticketRef)) + '/attachments/upload';
+  return {
+    method: 'POST',
+    contract: ATTACHMENT_UPLOAD_CONTRACT,
+    url: base + '?name={ENCODED_FILENAME}',
+    urlNote: 'name 是 URL-encode 後的檔名（encodeURIComponent），不是 multipart 的 field 名。',
+    body: 'raw bytes：檔案原始位元組直接當 request body。沒有 multipart/form-data，也沒有 JSON / base64 信封。',
+    headers: {
+      Authorization: 'Bearer <你的 LiteJira PAT>（本工具不輸出 PAT 的值；請自行從環境取得）',
+      'Content-Type': '檔案實際的 MIME（例 image/png）—— 不是 multipart/form-data',
+      'Content-Length': '檔案位元組數（若走 chunked 串流可省略）',
+      Accept: 'application/json'
+    },
+    forbiddenHeaders: {
+      'Idempotency-Key': '不可帶：後端回 422（串流上傳無法在送出前算出請求指紋）'
+    },
+    tool: 'litejira.uploadAttachment',
+    unknownOutcome: UPLOAD_UNKNOWN_OUTCOME
+  };
+}
+
+// 列附件：讀 GET /tickets/{ticket}/attachments → 取 data.items[] → 加 links。
+// ⚠️ **不走工單本體**：TicketDetail 契約上沒有附件欄（D-165），附件只有這一條專屬路由；
+// 讀工單再挖 attachments[] 永遠只會拿到 undefined。
+// 這條路由回完整集合、不分頁（每單上限個位數），所以沒有 cursor / nextCursor 要轉述；
+// 排序有決定性但不承諾是「使用者的順序」，呼叫端不該把位置當識別（識別用 id）。
+async function getAttachments_(input, cfg, fetchImpl) {
+  const outcome = await callV1Or_('listAttachments', { ticket: input.ticketId }, cfg, fetchImpl);
+  if (outcome.isError) return outcome;
+  const data = outcome.value;
+  const raw = data && typeof data === 'object' ? data.items : undefined;
+  const payload = {
+    ok: true,
+    ticket: input.ticketId,
+    paginated: false,
+    orderNote: '排序有決定性，但不是「使用者的順序」：附件不是有序清單，請以 id 指名單筆。',
+    download: {
+      api: { method: 'GET', contract: ATTACHMENT_DOWNLOAD_CONTRACT, auth: ATTACHMENT_AUTH.api },
+      web: { method: 'GET', contract: 'GET /api/web/attachments/{attachmentId}/content', auth: ATTACHMENT_AUTH.web },
+      note: '本 server 不代為下載附件內容：它不會把二進位塞進 JSON，也不會帶著 Bearer 跟隨 redirect。' +
+        '請用上面的 URL 自行取檔。'
+    },
+    upload: uploadDescriptor_(cfg, input.ticketId)
+  };
+  if (Array.isArray(raw)) {
+    payload.count = raw.length;
+    payload.attachments = raw.map(function (item) { return enrichAttachment_(item, cfg); });
+  } else {
+    // 回應裡沒有 items 這個陣列：不能回一個空陣列假裝「這張單沒有附件」——
+    // 「沒有附件」與「這份回應根本沒講附件」是兩件事，後者要講出來。
+    payload.count = null;
+    payload.attachments = null;
+    payload.unavailable = 'GET /tickets/{ticket}/attachments 的回應中沒有 items 陣列' +
+      '（不等於「沒有附件」）；請確認後端版本是否有這條路由。';
+  }
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    structuredContent: payload
+  };
+}
+
+// 上傳：本機檔案守門在傳輸層（普通檔案 / 非空 / 不超過上限），這裡只做三件事 ——
+// 把 URL 當 filePath 的情況擋下、補檔名與 MIME 的預設值、把結果與善後指示講清楚。
+async function uploadAttachmentTool_(input, cfg, fetchImpl) {
+  const filePath = input.filePath;
+  // 「給一條網址就幫我抓下來上傳」是明確拒絕的能力：那等於讓呼叫端用這台 server 的網路
+  // 去取任意外部資源（SSRF），而且抓回來的東西沒有人看過。
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(filePath.trim())) {
+    throw badInput_('filePath 必須是本機檔案路徑，不是 URL：本工具不會去下載任何遠端內容。' +
+      '要附加外部連結請用 litejira.attachLink；要上傳遠端檔案請自行下載到本機後再給路徑。',
+      { param: 'filePath' });
+  }
+  const resolved = path.resolve(filePath);
+  const name = input.name !== undefined ? input.name : path.basename(resolved);
+  const contentType = input.contentType !== undefined ? input.contentType : guessMime_(name);
+  const maxBytes = input.maxBytes !== undefined ? input.maxBytes : cfg.maxUploadBytes;
+
+  let result;
+  try {
+    result = await uploadAttachment({
+      fetch: fetchImpl || globalThis.fetch,
+      baseUrl: cfg.apiUrl,
+      token: cfg.token,
+      ticket: input.ticketId,
+      filePath: resolved,
+      name: name,
+      contentType: contentType,
+      maxBytes: maxBytes,
+      timeoutMs: input.timeoutMs === undefined ? 300000 : input.timeoutMs
+    });
+  } catch (err) {
+    if (err instanceof LiteJiraApiError && err.status < 500) return apiErrorResult_(err);
+    if (err instanceof LiteJiraTransportError || err instanceof LiteJiraApiError) {
+      // 5xx 也可能發生在檔案已保存之後，必須先對帳，不能宣稱沒有生效。
+      // 前者檔案可能已經在伺服器上了，盲目重送會留下兩筆。
+      const unknown = err instanceof LiteJiraApiError || err.code === 'timeout' || err.code === 'network_error' || err.code === 'invalid_response';
+      const payload = {
+        error: { code: err.code, message: err.message, details: err.details },
+        uploaded: unknown ? 'unknown' : 'no',
+        recovery: unknown
+          ? UPLOAD_UNKNOWN_OUTCOME + '（對帳請用 litejira.getAttachments ticketId=' + input.ticketId + '）'
+          : '這次上傳「沒有送出 / 沒有生效」（本機或伺服器明確拒絕）：修正後可直接重試。'
+      };
+      return {
+        isError: true,
+        content: [{ type: 'text', text: '[' + err.code + '] ' + err.message + '\n\n⚠️ ' + payload.recovery }],
+        structuredContent: payload
+      };
+    }
+    throw err;
+  }
+
+  // 回應只帶「檔案的身分」與伺服器回的 data，絕不回傳內容本身。
+  // 後端 201 的 data 就是**新建的那一筆附件**（與清單同一個投影），所以這裡與 getAttachments
+  // 走同一個 enrich：呼叫端上傳完可以直接拿到取檔 URL，不必再列一次附件。
+  // 原欄位一個不動（enrichAttachment_ 只新增 links），非物件（理論上不會發生）則原樣帶出。
+  const payload = {
+    ok: true,
+    status: result.status,
+    ticket: input.ticketId,
+    name: name,
+    contentType: contentType,
+    bytes: result.size,
+    filePath: resolved,
+    idempotencyKey: null,
+    idempotencyNote: '此端點不接受 Idempotency-Key（後端回 422）；重送＝真的再上傳一次。',
+    data: enrichAttachment_(result.data, cfg)
+  };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    structuredContent: payload
+  };
+}
+
 // 共用的 v1 呼叫 + 錯誤轉譯。回 { value } 或 MCP 的 isError 結果。
 // idempotencyKey 只有寫入路由會用到；讀取路由給了也不會掛上去（傳輸層決定）。
 async function callV1Or_(action, params, cfg, fetchImpl, idempotencyKey) {
@@ -1394,26 +1705,30 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           // GH-257 第四包：18 個工具全部接線，原本的「未接線」那一行退場（留著會讓助手不敢用已經可用的工具）；
           // 換上單欄更新的分流、批次的部分成功，以及 replyFeedback 非原子這三件會影響操作決策的事。
           instructions: [
-            'LiteJira MCP 操作規則（API v1）：',
-            '- 寫入必帶 idempotencyKey；去重僅限 24 小時保留期內＋輸入完全相同：結果不明先讀狀態，' +
-              '再用同一把 key 原輸入重送（不自動重試）；換 key 或過期都會再做一次。',
-            '- 建單一次填齊 reproSteps / expectedResult / 日期 / tags / ownerId 等正式欄位，別塞進 description。',
-            '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[] 的 label' +
-              '（退回類動作與「main不受影響」要帶 reason）。',
-            '- updateField 單欄更新：status 要 force=true（限管理者），assigneeId 要 reason，版本／父工單收 UUID。',
+            'LiteJira MCP 操作規則（v1）：',
+            '- 寫入必帶 idempotencyKey；去重限 24 小時內＋輸入相同：結果不明先讀狀態，' +
+              '用同一把 key 原輸入重送；換 key 或過期會再做一次。',
+            '- 建單填齊 reproSteps／expectedResult／日期／tags／ownerId 等正式欄位，別塞進 description。',
+            '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[].label' +
+              '（退回類與「main不受影響」帶 reason）。',
+            '- updateField 單欄：status 要 force=true（限管理者），assigneeId 要 reason，版本／父工單收 UUID。',
             '- batch 收 tickets（1-100）；回 succeeded/failed，200 不代表全成功，務必回報 failed。',
-            '- replyFeedback 非原子：先流轉再留言，每步各一把衍生鍵；失敗如實回報部分成功。',
+            '- replyFeedback 非原子：先流轉再留言，各一把衍生鍵；失敗如實回報部分成功。',
+            // GH-317：只留會改變操作決策的兩件（URL 可不可以貼給人、上傳不能重試），
+            // 欄位與認證細節在兩個工具的 schema 裡——預算不因新功能而放寬，其餘行同步壓縮。
+            '- 附件：getAttachments 的 links.web 可貼給人、links.api 需 Bearer；' +
+              '上傳無冪等鍵，結果不明先對帳不重送。',
             '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（會撞假衝突）。',
-            '- 工單參照可用 UUID / BUG-481 / 數字 key；成員條件只收 UUID，先讀 litejira://members。',
-            '- 受控值讀 litejira://meta，版本讀 litejira://versions，流轉讀 litejira://workflow/{type}。',
-            '- 專案層級資源取 LTJ_PROJECT 或 URI 帶 ?project=KEY；沒有就報錯，不猜專案。',
-            '- searchTickets 的 project 必填（同上取 LTJ_PROJECT），沒有「不帶就是全部」；' +
-              '唯一跨專案是 mine=assignee|creator|watcher，此時一般篩選全不可帶。',
+            '- 工單參照可用 UUID／BUG-481／數字 key；成員條件只收 UUID，先讀 litejira://members。',
+            '- 讀 litejira://meta（受控值）／litejira://versions／litejira://workflow/{type}。',
+            '- 專案層級資源取 LTJ_PROJECT 或 URI 的 ?project=KEY；沒有就報錯，不猜。',
+            '- searchTickets 的 project 必填（同上），沒有「不帶＝全部」；' +
+              '唯一跨專案是 mine=assignee|creator|watcher，此時一般篩選不可帶。',
             // GH-265 的 instructions 預算仍然成立（本行是換掉舊的「type/status 等可傳陣列多值」那一句，
             // 不是另開一行）：新增的能力只講「有哪些運算子」，細節在工具 schema 裡。
-            '- 清單用 limit+cursor 分頁（上限 100）；篩選每維度可多值且有 XNot，' +
-              'title/description 另有 XContains/XNotContains，另有 overdue、id（≤' + TICKET_ID_FILTER_MAX + '）。',
-            '- activity 用 kind=user|system 過濾，不帶 kind 是全部。'
+            '- 清單用 limit+cursor 分頁（上限 100）；每維度可多值且有 XNot，' +
+              'title/description 有 XContains/XNotContains，另有 overdue、id（≤' + TICKET_ID_FILTER_MAX + '）。',
+            '- activity 用 kind=user|system 過濾，不帶＝全部。'
           ].join('\n')
         }
       };

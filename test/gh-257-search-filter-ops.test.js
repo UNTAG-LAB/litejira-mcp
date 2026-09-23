@@ -385,5 +385,6 @@ test('工具說明與啟動 instructions 講出「不是 / 包含 / 逾期 / 指
   assert.match(res.result.instructions, /XNot/);
   assert.match(res.result.instructions, /XContains\/XNotContains/);
   assert.match(res.result.instructions, /overdue/);
+  // GH-317：預算維持 1000，附件那一行擠進既有額度；細節仍由工具 schema 承載。
   assert.ok(res.result.instructions.length <= 1000, '預算仍須成立：' + res.result.instructions.length);
 });

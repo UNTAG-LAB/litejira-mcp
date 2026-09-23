@@ -57,6 +57,10 @@ test('GH-265：instructions 維持瘦身，且保留 v1 操作安全規則', asy
   });
   const instructions = response.result.instructions;
 
+  // GH-317：預算**維持 1000 不動**。附件那一行是擠進既有額度的（其餘行同步壓縮），
+  // 不是把預算調高換來的——預算本身就是這個測試要守的東西，為了放新內容而調高它
+  // 等於每次加功能都把 instructions 加長一點，那正是 GH-265 當初要擋的漂移。
+  // 附件的細節（欄位、認證方式、上傳限制）一律由工具 schema 承載，不進 instructions。
   assert.ok(instructions.length <= 1000, 'instructions 長度 ' + instructions.length + ' 超出預算');
   ['litejira://meta', 'litejira://members', 'assigneeId', 'cursor', 'LTJ_PROJECT'].forEach((word) => {
     assert.ok(instructions.includes(word), `instructions 缺少 ${word}`);

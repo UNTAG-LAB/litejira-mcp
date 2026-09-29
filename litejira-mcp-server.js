@@ -38,7 +38,7 @@ const {
 
 // LJ-160 #2：版本號單一事實源 = package.json，避免手寫在多處漂移。
 const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
-const { resolveSettings } = require('./litejira-config');
+const { OFFICIAL_API_URL, resolveSettings } = require('./litejira-config');
 
 // 站台與專案都有內建預設，所以唯一可能缺的就是 token：訊息直接指向設定指令。
 const MISSING_TOKEN_MESSAGE =
@@ -243,6 +243,8 @@ const TOOL_DEFS = [
     'Search and filter tickets via API v1 (GET /tickets). PROJECT IS MANDATORY: pass project=<KEY>, or rely on the LTJ_PROJECT startup setting; with neither the server returns invalid_argument and this tool rejects the call locally. There is NO "omit project to search everything" mode. The ONLY cross-project query is mine=assignee|creator|watcher ("my tickets"), and when you go cross-project the server accepts NO other filter (no q, no type/status/priority/…, no member ids) — add project if you need to filter. Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. EVERY filter dimension accepts a string or an array of strings (positive conditions match any listed value; Not and NotContains exclude the entire listed set; different parameters are AND-ed) and EVERY dimension has a negated twin: append "Not" (statusNot, assigneeIdNot, typeNot, …) — a negated filter also matches tickets where that field is empty. The two text dimensions (title / description) additionally take Contains / NotContains for substring matching on that single column (q searches across columns instead). Also available: overdue=true|false (has a due date, past due, not final) and id=<uuid>[] to name up to ' + TICKET_ID_FILTER_MAX + ' specific tickets. All of these are general filters, so none of them may be combined with a bare cross-project mine query. Use litejira://ticket/{id} for one complete ticket.',
     'searchTickets', false, Object.assign({
       project: { type: 'string', description: '專案 key（必填）。省略時採用啟動環境的 LTJ_PROJECT；' +
+        '連正式站（litejira.untaglab.com）時就算憑證檔沒有 LTJ_PROJECT 這一行也有內建預設主專案 MAIN，' +
+        '所以「憑證檔只有 token」是完整的設定，不要因此判定使用者尚未設定完成。' +
         '兩者皆無時本機直接擋下 —— v1 的工單查詢一定要有專案範圍，不存在「不帶就是全部」。' +
         '真的要跨專案請改帶 mine（此時不能再帶任何其他篩選條件）。' },
       mine: {
@@ -544,7 +546,9 @@ const TOOL_DEFS = [
   tool('litejira.createTicket',
     'Create a ticket via API v1 (POST /tickets). Body is FLAT — core fields: project, type, title, priority?, description?, assigneeId?. ALL of these optional fields are supported too and go straight into the create call (do NOT stuff them into description and do NOT wait until after creation): module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, targetVersion, foundVersion. The 18 additional fields may be null; core priority/description/assigneeId may be omitted but not null; dates are YYYY-MM-DD; tags is an array of strings; assigneeId / ownerId are member UUIDs (display names are NOT accepted — read litejira://members). Controlled values (type / priority / releaseMethod / module / subtype / version strings) come from litejira://meta and litejira://versions; releaseMethod is validated by the server. NOT part of create: status (the workflow start status applies — use litejira.transitionTicket), parentId (create first, then litejira.linkTickets) and expectedUpdatedAt (nothing to lock yet). targetVersion / foundVersion here are version NAMES.',
     'createTicket', true, {
-      project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；兩者皆無會明確報錯（不會自動挑專案）。' },
+      project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；' +
+        '正式站（litejira.untaglab.com）即使沒設 LTJ_PROJECT 也有內建預設主專案 MAIN。' +
+        '兩者皆無會明確報錯（不會自動挑專案）。' },
       type: { type: 'string', description: '工單類型；IDEA 已退役，不能建單。', enum: ENUM_CREATE_TYPES },
       title: { type: 'string', description: '工單標題' },
       priority: { type: 'string', description: '優先級（含中文後綴），可省略，不接受 null。', enum: ENUM_PRIORITIES },
@@ -2114,6 +2118,19 @@ function getPromptMessages_(name, args) {
 function startStdioServer() {
   // 啟動時就把「寫入開關被打錯字」講出來（走 stderr，stdout 是 MCP 協定通道）。
   const startupWrites = resolveSettings(process.env);
+  // 直接被啟動（沒走 launcher）時，站台的遷移 / 疑慮同樣要講出來。
+  if (startupWrites.migratedFromLegacy) {
+    process.stderr.write(
+      'ℹ️  LTJ_API_URL 是已退役的舊正式站網址（' + startupWrites.legacyApiUrl + '），' +
+      '本次連線改用 ' + startupWrites.apiUrl + '；請執行 `litejira-mcp setup` 永久更新設定。\n'
+    );
+  }
+  if (startupWrites.isUnknownLegacyGas) {
+    process.stderr.write(
+      '⚠️  LTJ_API_URL 仍指向 Apps Script（GAS）網址：' + startupWrites.apiUrl + '，' +
+      '不是我們認得的舊正式站部署，故不自動遷移。請確認該站台是否仍在服務，或改用 ' + OFFICIAL_API_URL + '。\n'
+    );
+  }
   if (startupWrites.enableWritesInvalid) {
     process.stderr.write(
       '⚠️  LTJ_MCP_ENABLE_WRITES=「' + startupWrites.enableWritesRaw + '」不是 true/false，' +

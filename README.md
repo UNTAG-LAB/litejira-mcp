@@ -25,6 +25,10 @@
 **升級只要做一件事**：把 `LTJ_API_URL` 換成 `https://litejira.untaglab.com`（或整行刪掉，3.1 起預設就是它）。
 權杖沿用既有的 `ltj_pat_`，不必重辦。
 
+3.1.1 起加入自動遷移：如果 `LTJ_API_URL` 還是**舊正式站**那個 Apps Script 部署網址，會自動改用新正式站
+（啟動時會在 stderr 說一聲），`litejira-mcp setup` 也會直接用新網址驗證、成功後把新網址寫回憑證檔。
+這只對我們確認過的那個舊正式站部署成立 —— 其他 Apps Script 網址一律原樣保留、不會被改寫。
+
 ---
 
 ## 安裝與設定（兩步）
@@ -143,6 +147,8 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 - **寫入預設改為開啟**：3.0 需要明寫 `LTJ_MCP_ENABLE_WRITES=true` 才能寫；3.1 起不設就是可寫。
   要維持唯讀請明寫 `LTJ_MCP_ENABLE_WRITES=false`。
 - `LTJ_API_URL` / `LTJ_PROJECT` 變成可省略，但你既有的設定會原樣保留、繼續生效。
+  唯一例外：已退役的**舊正式站** Apps Script 網址會自動改用 `https://litejira.untaglab.com`
+  （於是專案也跟著套用預設主專案 `MAIN`），`setup` 驗證成功後會把新網址寫回憑證檔。
 
 ---
 
@@ -275,6 +281,7 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | 說「overdue 只接受布林值」 | `overdue` 只認 `true` / `false`；`"yes"`、`1` 一律拒絕（打錯字與明確指定要分得出來） |
 | 說「id 一次最多 50 個值」 | `id` 是指名查詢不是翻頁：超過 50 張請改用篩選條件＋ `cursor` 分頁 |
 | 大量 `invalid_response`（不是 JSON） | `LTJ_API_URL` 可能還指著舊的 Apps Script 後端。3.x 只連 `https://litejira.untaglab.com` 這類 2.0 REST 站 |
+| `setup` 說「站台仍是 Apps Script（GAS）網址」 | 你的 `LTJ_API_URL` 是我們認不得的 Apps Script 部署，不會自動遷移（怕把資料送到別人的系統）。要用正式站就把該行改成 `https://litejira.untaglab.com` 或刪掉；確定要留自訂站台就補 `LTJ_PROJECT=<key>` |
 | 寫入回逾時 / 5xx / `in_progress`，不知道成功沒 | **先讀工單現況**再說。要重送就用同一把 idempotencyKey ＋ 完全相同的輸入，且在 24 小時內；不要換新 key |
 | `WRITES_DISABLED` | 3.1 起寫入預設開啟，會看到這個代表 `LTJ_MCP_ENABLE_WRITES` 被設成 `false` 或設成了 `true`/`false` 以外的值（打錯字一律當唯讀）。拿掉那一行或改成 `true` |
 | 上傳說 `file_too_large` | 檔案超過上限（預設 25 MiB）。調 `LTJ_MCP_MAX_UPLOAD_BYTES`（天花板 100 MiB），或改附連結 |

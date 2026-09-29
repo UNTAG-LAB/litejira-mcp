@@ -16,6 +16,7 @@ const { callV1 } = require('./litejira-v1-transport');
 const {
   CREDENTIAL_KEYS,
   OFFICIAL_API_URL,
+  isLegacyOfficialUrl,
   resolveSettings
 } = require('./litejira-config');
 
@@ -148,7 +149,8 @@ function printHelp(write) {
   write('  prod / dev → credentials.prod.env / credentials.dev.env（`litejira-mcp prod|dev` 讀）\n');
   write('\n');
   write('  只會問 token：站台預設 ' + OFFICIAL_API_URL + '，專案預設 MAIN。\n');
-  write('  已設定的 LTJ_API_URL / LTJ_PROJECT（環境變數或憑證檔）一律保留，不會被覆蓋。\n');
+  write('  已設定的 LTJ_API_URL / LTJ_PROJECT（環境變數或憑證檔）一律保留，不會被覆蓋；\n');
+  write('  唯一例外是已退役的舊正式站網址 —— 會自動改用新正式站，並在驗證成功後更新憑證檔。\n');
   write('  token 不需要、也不應該貼進 AI 對話視窗。\n');
 }
 
@@ -192,11 +194,28 @@ async function runSetup(argv, options) {
 
   stdout.write('LiteJira MCP 設定\n');
   stdout.write('  站台：' + settings.apiUrl +
-    (settings.apiUrlSource === 'default' ? '（預設正式站）' : '（沿用既有設定）') + '\n');
+    (settings.apiUrlSource === 'default' ? '（預設正式站）'
+      : settings.migratedFromLegacy ? '（已自動改用新正式站）' : '（沿用既有設定）') + '\n');
+  if (settings.migratedFromLegacy) {
+    stdout.write('  ↳ 既有設定是已退役的舊正式站網址（Apps Script）：' + settings.legacyApiUrl + '\n');
+    stdout.write('  ↳ 本次改用新正式站網址驗證；驗證成功後會一併更新憑證檔裡的 LTJ_API_URL。\n');
+  }
   stdout.write('  專案：' + (settings.project || '（未設定）') +
     (settings.projectSource === 'default' ? '（正式站預設主專案）'
       : settings.projectSource === 'env' ? '（沿用既有設定）' : '') + '\n');
   stdout.write('  憑證檔：' + resolved.file + '\n');
+  // 不在 allowlist 的 GAS 網址：問題出在站台本身，不是少了 LTJ_PROJECT。
+  // 這裡不猜也不改寫（可能是別人自架的部署），只把狀況講清楚讓人自己決定。
+  if (settings.isUnknownLegacyGas && !settings.project) {
+    stderr.write(
+      '目前設定的站台仍是 Apps Script（GAS）網址：' + settings.apiUrl + '\n' +
+      '這不是我們認得的舊正式站部署，所以不會自動遷移（貿然改寫可能把資料送到別人的系統）。\n' +
+      '請確認這個站台是否仍在使用：若你要用的是正式站，請把 LTJ_API_URL 改成 ' + OFFICIAL_API_URL +
+      '（或把該行刪掉沿用預設）後重跑 setup；若確定要留著這個自訂站台，請另外設定 LTJ_PROJECT=<專案 key>。\n' +
+      '未變更任何憑證。\n'
+    );
+    return 2;
+  }
   if (!settings.project) {
     stderr.write('自訂站台沒有內建預設專案；請先在憑證檔設定 LTJ_PROJECT=<專案 key> 再執行 setup。\n');
     return 2;
@@ -236,9 +255,18 @@ async function runSetup(argv, options) {
     return 1;
   }
 
+  // 驗證成功才寫檔，而且遷移後的網址要一起落地 —— 否則下次啟動讀到的還是舊網址，
+  // 每次都得靠執行期再遷移一遍（而 setup 明明已經確認過新網址可用）。
   const updates = { LTJ_API_TOKEN: token };
+  if (settings.migratedFromLegacy) updates.LTJ_API_URL = settings.apiUrl;
   writeCredFile(resolved.file, mergeCredText(existing.lines, updates));
   stdout.write('✅ 已驗證並寫入本機 ' + resolved.file + '。\n');
+  if (settings.migratedFromLegacy) {
+    stdout.write('   已將站台從舊正式站網址更新為 ' + settings.apiUrl + '（舊網址已退役）。\n');
+    if (isLegacyOfficialUrl(env.LTJ_API_URL)) {
+      stdout.write('   注意：環境變數 LTJ_API_URL 仍是舊網址，執行時會優先於憑證檔；請一併更新或移除它。\n');
+    }
+  }
   stdout.write('   站台 ' + settings.apiUrl + '、專案 ' + settings.project + '；實際可讀寫的範圍仍以你在 LiteJira 的權限為準。\n');
   stdout.write('   接著在 AI 工具註冊 MCP：command 填 litejira-mcp' + (target ? '、args 填 ["' + target + '"]' : '') + '。\n');
   return 0;

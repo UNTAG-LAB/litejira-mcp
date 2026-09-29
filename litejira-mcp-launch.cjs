@@ -108,9 +108,23 @@ if (credFile) {
   }
 }
 
-// 憑證檔讀完後補上內建預設（正式站 + 主專案 MAIN），讓「只有 token」也能直接用。
-// 只補沒有的鍵，所以檔案 / 環境變數裡的既有設定一律優先。
+// 憑證檔讀完後套用共用裁決（正式站 + 主專案 MAIN），讓「只有 token」也能直接用。
+// 既有設定一律優先；唯一會被改寫的是已退役的舊正式站網址（見 litejira-config 的 allowlist）。
+// 這裡寫回 process.env 很關鍵：子行程只看得到環境變數，沒寫回就會照舊網址連線。
 const settings = require('./litejira-config').applyDefaults(process.env);
+if (settings.migratedFromLegacy) {
+  process.stderr.write(
+    'ℹ️  偵測到已退役的舊正式站網址（' + settings.legacyApiUrl + '），本次改用 ' + settings.apiUrl + ' 啟動。\n' +
+    '   請執行 `litejira-mcp setup' + ((SUB === 'prod' || SUB === 'dev') ? ' ' + SUB : '') + '` 讓設定永久更新。\n'
+  );
+}
+if (settings.isUnknownLegacyGas) {
+  process.stderr.write(
+    '⚠️  LTJ_API_URL 仍指向 Apps Script（GAS）網址：' + settings.apiUrl + '\n' +
+    '   這不是我們認得的舊正式站部署，不會自動遷移。請確認該站台是否仍在服務；\n' +
+    '   若要改用正式站，請將 LTJ_API_URL 改為 https://litejira.untaglab.com 或刪除該行後重啟。\n'
+  );
+}
 if (settings.enableWritesInvalid) {
   process.stderr.write(
     '⚠️  LTJ_MCP_ENABLE_WRITES=「' + settings.enableWritesRaw + '」不是 true/false，' +

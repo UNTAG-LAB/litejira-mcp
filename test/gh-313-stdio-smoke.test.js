@@ -28,6 +28,7 @@ const UUID = '3f1c2b4a-5d6e-4f70-8a91-b2c3d4e5f607';
 // stub 的回應一律是 v1 的 { data } 信封；內容只要夠讓客戶端拆信封即可，
 // 不假裝是真資料（這支測的是通路，不是後端語意）。
 function stubPayloadFor(pathname) {
+  if (/\/tickets\/[^/]+\/links$/.test(pathname)) return { items: [] };
   if (/\/tickets\/[^/]+\/comments$/.test(pathname)) return { items: [], nextCursor: null };
   if (/\/tickets\/[^/]+\/activity$/.test(pathname)) return { items: [], nextCursor: null };
   if (/\/tickets\/[^/]+\/transitions$/.test(pathname)) return { actions: [], transitions: [] };
@@ -139,11 +140,11 @@ test('GH-313 stdio smoke：唯讀通路（4 讀取工具 / 6 資源 / 4 提示�
 
   // ── 清單：20 工具（GH-317 加了 getAttachments / uploadAttachment）/ 4 固定資源 + 2 模板 / 4 提示 ──
   const tools = okResult(await client.call('tools/list'), 'tools/list').tools;
-  assert.strictEqual(tools.length, 20, '工具數：' + tools.map((x) => x.name).join(', '));
+  assert.strictEqual(tools.length, 23, '工具數：' + tools.map((x) => x.name).join(', '));
 
   const resources = okResult(await client.call('resources/list'), 'resources/list').resources;
   const templates = okResult(await client.call('resources/templates/list'), 'templates').resourceTemplates;
-  assert.strictEqual(resources.length + templates.length, 6);
+  assert.strictEqual(resources.length + templates.length, 7);
 
   const prompts = okResult(await client.call('prompts/list'), 'prompts/list').prompts;
   assert.strictEqual(prompts.length, 4);
@@ -177,7 +178,8 @@ test('GH-313 stdio smoke：唯讀通路（4 讀取工具 / 6 資源 / 4 提示�
     ['litejira://versions', '/api/v1/versions'],
     ['litejira://dashboard?scope=me', '/api/v1/stats'],
     ['litejira://workflow/BUG', '/api/v1/workflow'],
-    ['litejira://ticket/BUG-481', '/api/v1/tickets/BUG-481']
+    ['litejira://ticket/BUG-481', '/api/v1/tickets/BUG-481'],
+    ['litejira://ticket/BUG-481/links', '/api/v1/tickets/BUG-481/links']
   ];
   for (const entry of resourceCalls) {
     const before = stub.requests.length;

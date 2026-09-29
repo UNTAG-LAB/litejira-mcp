@@ -100,7 +100,7 @@ npm update -g litejira-mcp
 LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 ```
 
-它會用真正的 stdio 通道跑一遍握手、20 個工具的清單、6 個資源、4 個提示與 4 個讀取工具，
+它會用真正的 stdio 通道跑一遍握手、23 個工具的清單、7 個資源、4 個提示與 4 個讀取工具，
 逐項印出 ✔ / ✖，全過回 exit 0。腳本本身不含也不寫入任何憑證，只從環境變數讀，而且不把權杖印出來。
 （自訂站台請另外給 `LTJ_API_URL` 與 `LTJ_PROJECT`。）
 
@@ -154,7 +154,7 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 
 ## 能做什麼
 
-> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，20 個工具都能用。
+> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，23 個工具都能用。
 > 三件要知道的事：
 > 1. **批量操作是「部分成功」的**：一次處理 N 張，伺服器會回「成功哪幾張、失敗哪幾張」，
 >    整體回應成功不代表每張都改到了。AI 應該把失敗清單如實講給你聽。
@@ -297,3 +297,16 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 ## License
 
 MIT
+
+
+### 工單連結與 MR／PR
+
+網站工單頂端的「加連結」對應 `ticket_links`，與附件分開：
+
+- `litejira.listTicketLinks({ticketId})` 或 `litejira://ticket/{id}/links`：讀完整連結清單，回傳 `items`。
+- `litejira.addTicketLink({ticketId, url, label?, kind?, idempotencyKey})`：加入同一區塊。MR／PR 指定 `kind: "mr"`；其他種類為 `design`、`doc`、`sheet`、`video`、`other`（省略預設 `other`）。
+- `litejira.removeTicketLink({ticketId, linkId, idempotencyKey})`：使用清單回傳的連結 UUID 移除，回傳剩餘 `items`，不會刪除外部文件。
+
+`attachLink` 仍是 URL 附件，不會寫到「加連結」區。工單詳情的 `mrUrl` 是舊欄位，不能代表完整 MR 清單；需要相容舊資料時也讀工單詳情。通用連結寫入不會順便變更工單狀態或舊 `mrUrl`。
+
+新增／移除遵守既有写入開關與伺服器權限，`idempotencyKey` 只送 HTTP header。相同網址可有多筆不同連結；遇到逾時或不確定結果時，先列出連結確認，必要重試只在24小時內沿用同一識別碼與完全相同輸入，工具不自動重試。

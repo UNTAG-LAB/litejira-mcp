@@ -133,17 +133,17 @@ async function main() {
     });
 
     let toolCount = 0;
-    await step('tools/list = 20', async function () {
+    await step('tools/list = 23', async function () {
       const tools = resultOf(await client.call('tools/list'), 'tools/list').tools;
       toolCount = tools.length;
-      if (tools.length !== 20) throw new Error('預期 20，實得 ' + tools.length);
-      return '20 個工具';
+      if (tools.length !== 23) throw new Error('預期 23，實得 ' + tools.length);
+      return '23 個工具';
     });
-    await step('resources/list + templates = 6', async function () {
+    await step('resources/list + templates = 7', async function () {
       const fixed = resultOf(await client.call('resources/list'), 'resources/list').resources;
       const templated = resultOf(await client.call('resources/templates/list'), 'templates').resourceTemplates;
       const total = fixed.length + templated.length;
-      if (total !== 6) throw new Error('預期 6，實得 ' + total);
+      if (total !== 7) throw new Error('預期 7，實得 ' + total);
       return fixed.length + ' 固定 + ' + templated.length + ' 模板';
     });
     await step('prompts/list = 4', async function () {
@@ -196,7 +196,8 @@ async function main() {
       for (const entry of [
         ['litejira.listComments', { ticketId: ticket, limit: 5 }],
         ['litejira.getActivityLog', { ticketId: ticket, limit: 5 }],
-        ['litejira.getTransitions', { ticketId: ticket }]
+        ['litejira.getTransitions', { ticketId: ticket }],
+        ['litejira.listTicketLinks', { ticketId: ticket }]
       ]) {
         await step('tools/call ' + entry[0], async function () {
           const result = resultOf(await client.call('tools/call',

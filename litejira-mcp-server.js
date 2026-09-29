@@ -382,8 +382,28 @@ const TOOL_DEFS = [
         body: '留言內文在本工具的參數名是 content（addComment 才是 body）'
       }
     }),
+  tool('litejira.listTicketLinks',
+    'List ALL external links in the ticket UI Add link section (MR/PR, design, doc, sheet, video, other), via GET /tickets/{ticketId}/links. Returns {items:[{id,url,label,kind,createdAt,createdBy}]}, unpaginated. These are ticket_links, NOT attachments and NOT the legacy mrUrl field. Use addTicketLink with kind=mr for MR/PR; removeTicketLink takes the returned link id.',
+    'listTicketLinks', false, { ticketId: P_TICKET_REF }, ['ticketId'],
+    { title: '列出工單連結（含 MR／PR）' }, { v1: { action: 'listTicketLinks' } }),
+  tool('litejira.addTicketLink',
+    'Add an external link to the SAME Add link section shown in the ticket UI, via POST /tickets/{ticketId}/links. Set kind=mr for MR/PR (not attachLink, which creates an attachment). Body {url,label?,kind?}; default kind=other. Returns the created {id,url,label,kind,createdAt,createdBy}. Same URL may be added twice. Requires idempotencyKey. On an uncertain response, first listTicketLinks; any retry must use the same key and identical request within the 24-hour retention window. Does not change status or the legacy mrUrl field.',
+    'addTicketLink', true, {
+      ticketId: P_TICKET_REF,
+      url: { type: 'string', description: '外部網址（最多2048字元）；可省略https://，不得內嵌帳密。伺服器驗證並正規化。' },
+      label: { type: 'string', description: '選填顯示名稱，最多100字元，空字串顯示網址。' },
+      idempotencyKey: P_IDEMPOTENCY,
+      kind: { type: 'string', enum: ['mr', 'design', 'doc', 'sheet', 'video', 'other'], description: 'MR／PR使用mr；省略為other。' }
+    }, ['ticketId', 'url', 'idempotencyKey'], { title: '加入工單連結（含 MR／PR）', idempotentHint: true },
+    { v1: { action: 'addTicketLink' } }),
+  tool('litejira.removeTicketLink',
+    'Remove one external ticket link from the UI Add link section via DELETE /tickets/{ticketId}/links/{linkId}. Use the UUID from listTicketLinks, NOT an attachment id or URL. Returns {items:[remaining links]}, HTTP 200 (not 204). A missing or cross-ticket id returns not_found. Requires idempotencyKey; after an uncertain response, listTicketLinks first, then retry only with the same key and identical request within 24 hours. Does not delete the external document.',
+    'removeTicketLink', true, {
+      ticketId: P_TICKET_REF, linkId: { type: 'string', description: 'listTicketLinks回傳的連結UUID。' }, idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'linkId', 'idempotencyKey'], { title: '移除工單連結', destructiveHint: true, idempotentHint: true },
+    { v1: { action: 'removeTicketLink' } }),
   tool('litejira.attachLink',
-    'Attach a reference URL (doc, design, external page) to a ticket via API v1 (POST /tickets/{ticketId}/attachments). Body is exactly { url, name? } — v1 attachments have no "kind" classification. Returns the created attachment; keep its "id" — that id (NOT the url) is what litejira.removeAttachment needs.',
+    'Attach a reference URL (doc, design, external page) to a ticket via API v1 (POST /tickets/{ticketId}/attachments). For the UI Add link section and MR/PR use addTicketLink instead. Body is exactly { url, name? } — v1 attachments have no "kind" classification. Returns the created attachment; keep its "id" — that id (NOT the url) is what litejira.removeAttachment needs.',
     'attachLink', true, {
       ticketId: P_TICKET_REF,
       url: { type: 'string', description: '參考連結 URL，必須 http:// 或 https:// 開頭' },
@@ -396,7 +416,7 @@ const TOOL_DEFS = [
     }, {
       v1: { action: 'attachLink' },
       removedParams: {
-        kind: 'v1 的附件不分 kind，只收 { url, name? }；分類資訊請寫進 name'
+        kind: 'v1附件不分kind；要寫入網站加連結區的MR／PR等分類請改用litejira.addTicketLink。'
       }
     }),
   tool('litejira.removeAttachment',
@@ -844,9 +864,15 @@ const RESOURCE_DEFS = [
   },
   {
     uriTemplate: 'litejira://ticket/{id}', name: '工單詳情',
-    description: '單張工單完整資料。{id} 可用 UUID 主鍵、公開 key（BUG-481）或純數字 key。',
+    description: '單張工單資料。{id} 可用 UUID 主鍵、公開 key（BUG-481）或純數字 key。新版 MR／PR 與通用連結另讀 litejira://ticket/{id}/links 或 listTicketLinks；mrUrl 僅是舊欄位，並非完整連結清單。',
     action: 'getTicket', needsProject: false, query: [],
     paramMap: (path) => ({ ticket: decodeURIComponent(path.split('/').pop()) })
+  },
+  {
+    uriTemplate: 'litejira://ticket/{id}/links', name: '工單連結（含 MR／PR）',
+    description: '與網站「加連結」共用的完整外部連結清單 {items:[...]}，kind=mr 是 MR／PR。不是附件；舊 mrUrl 另見工單詳情。',
+    action: 'listTicketLinks', needsProject: false, query: [],
+    paramMap: (path) => ({ ticketId: decodeURIComponent(path.split('/').slice(-2)[0]) })
   }
 ];
 
@@ -1623,6 +1649,7 @@ async function uploadAttachmentTool_(input, cfg, fetchImpl) {
 // 共用的 v1 呼叫 + 錯誤轉譯。回 { value } 或 MCP 的 isError 結果。
 // idempotencyKey 只有寫入路由會用到；讀取路由給了也不會掛上去（傳輸層決定）。
 async function callV1Or_(action, params, cfg, fetchImpl, idempotencyKey) {
+  const ticketLinkWrite = action === 'addTicketLink' || action === 'removeTicketLink';
   const fetchFn = fetchImpl || globalThis.fetch;
   if (!fetchFn) throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
   let result;
@@ -1637,10 +1664,16 @@ async function callV1Or_(action, params, cfg, fetchImpl, idempotencyKey) {
     });
   } catch (err) {
     if (err instanceof LiteJiraApiError) {
+      if (ticketLinkWrite && err.status >= 500) {
+        throw mcpError_('write_outcome_unknown', '工單連結寫入結果未知；先用 listTicketLinks 回讀確認，若需重試，僅能在24小時內使用原idempotencyKey與完全相同輸入。', { cause: err.code }, -32000);
+      }
       // 後端裁決：code / message / details 原樣轉出，不重新編碼、不映射回舊的四種代碼。
       return apiErrorResult_(err);
     }
     if (err instanceof LiteJiraTransportError) {
+      if (ticketLinkWrite && ['timeout', 'network_error', 'invalid_response', 'aborted'].includes(err.code)) {
+        throw mcpError_('write_outcome_unknown', '工單連結寫入結果未知；先用 listTicketLinks 回讀確認，若需重試，僅能在24小時內使用原idempotencyKey與完全相同輸入。', { cause: err.code }, -32000);
+      }
       // 本機拒絕 / 連線層失敗：code 與 API 錯誤碼刻意不同名，呼叫端一看就知道沒到後端。
       throw mcpError_(err.code, err.message, err.details, -32000);
     }

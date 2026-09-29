@@ -403,6 +403,28 @@ const ACTION_MAP = Object.freeze({
     contractRef: 'POST /api/v1/tickets/{ticketId}/comments'
   }),
 
+  listTicketLinks: Object.freeze({
+    method: 'GET', pathTemplate: '/tickets/{ticketId}/links',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    contractRef: 'GET /api/v1/tickets/{ticketId}/links'
+  }),
+  addTicketLink: Object.freeze({
+    method: 'POST', pathTemplate: '/tickets/{ticketId}/links',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['url', 'label', 'kind']), required: Object.freeze(['url']),
+      string: Object.freeze(['url', 'label', 'kind']), allowEmptyString: Object.freeze(['label'])
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/links'
+  }),
+  removeTicketLink: Object.freeze({
+    method: 'DELETE', pathTemplate: '/tickets/{ticketId}/links/{linkId}',
+    pathParams: Object.freeze(['ticketId', 'linkId']), pathUuid: Object.freeze(['linkId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    contractRef: 'DELETE /api/v1/tickets/{ticketId}/links/{linkId}'
+  }),
   attachLink: Object.freeze({
     method: 'POST',
     pathTemplate: '/tickets/{ticketId}/attachments',

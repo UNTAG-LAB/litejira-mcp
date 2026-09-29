@@ -38,6 +38,11 @@ const {
 
 // LJ-160 #2：版本號單一事實源 = package.json，避免手寫在多處漂移。
 const PKG_VERSION = require('./package.json').version;        // 例 "2.3.0"
+const { resolveSettings } = require('./litejira-config');
+
+// 站台與專案都有內建預設，所以唯一可能缺的就是 token：訊息直接指向設定指令。
+const MISSING_TOKEN_MESSAGE =
+  'LTJ_API_TOKEN is required（亦接受舊名 LTJ_API_PAT）。請在終端機執行 `litejira-mcp setup` 輸入你的 PAT。';
 
 // GH-257：v1 的工單參照可以是 UUID、字母 key（BUG-481）或純數字 key，三者都直接進路徑。
 // 舊版只認固定前綴的 PREFIX-NNN，會把 v1 主鍵 UUID 擋在門外，故放寬。
@@ -926,13 +931,17 @@ function listTools() {
 
 function getConfigFromEnv(env) {
   const runtimeEnv = env || process.env;
+  // 站台 / 專案 / 寫入開關的預設由共用模組裁決（token-only 也能直接用正式站主專案）。
+  const settings = resolveSettings(runtimeEnv);
   return {
-    apiUrl: runtimeEnv.LTJ_API_URL || '',
-    token: runtimeEnv.LTJ_API_TOKEN || runtimeEnv.LTJ_API_PAT || '',
+    apiUrl: settings.apiUrl,
+    token: settings.token,
     // GH-257：專案層級端點（meta / versions / dashboard / workflow）的預設專案。
-    // 非祕密設定；沒設也不猜，缺的時候明確報錯。
-    project: runtimeEnv.LTJ_PROJECT || '',
-    enableWrites: String(runtimeEnv.LTJ_MCP_ENABLE_WRITES || '').toLowerCase() === 'true',
+    // 自訂站台沒有內建預設；沒設也不猜，缺的時候明確報錯。
+    project: settings.project,
+    enableWrites: settings.enableWrites,
+    enableWritesInvalid: settings.enableWritesInvalid,
+    enableWritesRaw: settings.enableWritesRaw,
     // GH-317：附件上傳的位元組上限。非祕密設定；沒設用預設值，設了壞值一律當面報錯
     //（靜默退回預設＝使用者以為調大了，實際沒有，然後撞一個看不懂的 file_too_large）。
     maxUploadBytes: parseMaxUploadBytes_(runtimeEnv.LTJ_MCP_MAX_UPLOAD_BYTES)
@@ -967,8 +976,15 @@ async function callTool(name, args, config, fetchImpl) {
   // 未升級的工具先擋：不論 LTJ_MCP_ENABLE_WRITES 設成什麼，回答都一樣且誠實。
   assertMigrated_(def);
   const cfg = config || getConfigFromEnv();
-  if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', 'LTJ_API_URL and LTJ_API_TOKEN are required (legacy LTJ_API_PAT also accepted)');
-  if (def.write && !cfg.enableWrites) throw mcpError_('WRITES_DISABLED', 'write tools require LTJ_MCP_ENABLE_WRITES=true');
+  if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', MISSING_TOKEN_MESSAGE);
+  if (def.write && !cfg.enableWrites) {
+    // 非法值（既不是 true 也不是 false）一律當成關閉，但錯誤訊息要點名那個值，
+    // 否則使用者以為自己「已經打開了」，只會反覆重試同一個打錯的字。
+    const detail = cfg.enableWritesInvalid
+      ? 'LTJ_MCP_ENABLE_WRITES 的值「' + cfg.enableWritesRaw + '」不合法（只接受 true / false），已 fail closed 視為唯讀'
+      : 'write tools require LTJ_MCP_ENABLE_WRITES=true';
+    throw mcpError_('WRITES_DISABLED', detail);
+  }
 
   const input = validateToolInput(def, args || {});
   // Idempotency-Key 走 header，不是 body 欄位：在這裡抽出來，別讓它混進 params。
@@ -1985,7 +2001,7 @@ async function readResource_(uri, config, fetchImpl) {
   }
   if (!def) throw mcpError_('UNKNOWN_RESOURCE', 'unknown resource URI: ' + uri, undefined, -32602);
   var cfg = config || getConfigFromEnv();
-  if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', 'LTJ_API_URL and LTJ_API_TOKEN are required');
+  if (!cfg.apiUrl || !cfg.token) throw mcpError_('CONFIG_ERROR', MISSING_TOKEN_MESSAGE);
 
   var params = resourceParams_(def, parts, cfg);
   var outcome = await callV1Or_(def.action, params, cfg, fetchImpl);
@@ -2096,6 +2112,14 @@ function getPromptMessages_(name, args) {
 }
 
 function startStdioServer() {
+  // 啟動時就把「寫入開關被打錯字」講出來（走 stderr，stdout 是 MCP 協定通道）。
+  const startupWrites = resolveSettings(process.env);
+  if (startupWrites.enableWritesInvalid) {
+    process.stderr.write(
+      '⚠️  LTJ_MCP_ENABLE_WRITES=「' + startupWrites.enableWritesRaw + '」不是 true/false，' +
+      '本次以唯讀模式啟動（fail closed）。\n'
+    );
+  }
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
   rl.on('line', async (line) => {
     let parsed;

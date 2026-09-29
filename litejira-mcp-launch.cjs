@@ -72,7 +72,30 @@ function resolveCredFile() {
   return null;
 }
 
+// `litejira-mcp setup [prod|dev]`：互動式設定 token，不啟動 MCP server。
+// 放在讀憑證之前分流，因為 setup 自己要決定要更新哪個檔。
+const SUB = (process.argv[2] || '').toLowerCase();
+if (SUB === 'setup') {
+  require('./litejira-setup')
+    .runSetup(process.argv.slice(3))
+    .then((code) => { process.exit(code); })
+    .catch((err) => {
+      process.stderr.write('setup 失敗：' + (err && err.message ? err.message : String(err)) + '\n');
+      process.exit(1);
+    });
+  return;
+}
+if (SUB === 'help' || SUB === '--help' || SUB === '-h') {
+  process.stdout.write(
+    '用法：\n' +
+    '  litejira-mcp setup [prod|dev]   互動式輸入並驗證 PAT，寫入 ~/.litejira/\n' +
+    '  litejira-mcp [prod|dev]         啟動 MCP server（由 AI 工具呼叫，走 stdio）\n'
+  );
+  process.exit(0);
+}
+
 const credFile = resolveCredFile();
+const envHasToken = !!(process.env.LTJ_API_TOKEN || process.env.LTJ_API_PAT);
 if (credFile) {
   const text = fs.readFileSync(credFile, 'utf8');
   for (const line of text.split(/\r?\n/)) {
@@ -81,8 +104,18 @@ if (credFile) {
     // 白名單之外的行一律忽略，避免 credentials 檔意外注入任意環境變數。
     const m = line.match(
       /^(LTJ_API_URL|LTJ_API_TOKEN|LTJ_API_PAT|LTJ_MCP_ENABLE_WRITES|LTJ_PROJECT|LTJ_MCP_MAX_UPLOAD_BYTES)=(.+)$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+    if (m && !(envHasToken && (m[1] === 'LTJ_API_TOKEN' || m[1] === 'LTJ_API_PAT')) && !process.env[m[1]]) process.env[m[1]] = m[2];
   }
+}
+
+// 憑證檔讀完後補上內建預設（正式站 + 主專案 MAIN），讓「只有 token」也能直接用。
+// 只補沒有的鍵，所以檔案 / 環境變數裡的既有設定一律優先。
+const settings = require('./litejira-config').applyDefaults(process.env);
+if (settings.enableWritesInvalid) {
+  process.stderr.write(
+    '⚠️  LTJ_MCP_ENABLE_WRITES=「' + settings.enableWritesRaw + '」不是 true/false，' +
+    '本次以唯讀模式啟動（fail closed）。\n'
+  );
 }
 
 const serverPath = path.join(__dirname, 'litejira-mcp-server.js');

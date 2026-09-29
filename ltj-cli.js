@@ -9,6 +9,7 @@ const {
   TICKET_FILTER_MULTI_FIELDS,
   TICKET_ID_FILTER_MAX
 } = require('./litejira-v1-transport');
+const { resolveSettings } = require('./litejira-config');
 
 // 本機拒絕（送出前就知道不合法 / 契約缺列）→ exit 2；真的打出去才失敗（網路、逾時、業務錯誤）→ exit 1。
 const LOCAL_REJECT_CODES = [
@@ -180,10 +181,12 @@ async function runCli(argv, env, io, fetchImpl) {
   }
 
   const runtimeEnv = env || process.env;
-  const url = runtimeEnv.LTJ_API_URL;
-  const token = runtimeEnv.LTJ_API_TOKEN || runtimeEnv.LTJ_API_PAT;
-  if (!url || !token) {
-    output.error('缺少 LTJ_API_URL 或 LTJ_API_TOKEN（亦接受舊名 LTJ_API_PAT）');
+  // 站台 / 專案預設與 MCP server 共用同一套裁決，避免兩邊行為分岔。
+  const settings = resolveSettings(runtimeEnv);
+  const url = settings.apiUrl;
+  const token = settings.token;
+  if (!token) {
+    output.error('缺少 LTJ_API_TOKEN（亦接受舊名 LTJ_API_PAT）；請執行 `litejira-mcp setup` 設定 PAT');
     return 2;
   }
 
@@ -194,8 +197,8 @@ async function runCli(argv, env, io, fetchImpl) {
   }
 
   // 與 MCP 相同：我的跨專案查詢不偷偷套用預設專案。
-  if (parsed.action === 'searchTickets' && !parsed.params.project && !parsed.params.mine && runtimeEnv.LTJ_PROJECT) {
-    parsed.params.project = runtimeEnv.LTJ_PROJECT;
+  if (parsed.action === 'searchTickets' && !parsed.params.project && !parsed.params.mine && settings.project) {
+    parsed.params.project = settings.project;
   }
 
   let result;
@@ -355,7 +358,8 @@ function printUsage_(writeLine) {
   writeLine('             [--overdue true|false]（已逾期：有到期日、已過期且未進終態）');
   writeLine('             [--id <uuid>]（可重複，一次最多 ' + TICKET_ID_FILTER_MAX + ' 張；只收 UUID）');
   writeLine('             [--mine assignee|creator|watcher]（跨專案時不可搭配上述任何篩選）');
-  writeLine('             專案省略時採用 LTJ_PROJECT；只帶 --mine 時不套用預設專案。');
+  writeLine('             專案省略時採用 LTJ_PROJECT（連正式站未設時＝主專案 MAIN）；');
+  writeLine('             只帶 --mine 時不套用預設專案。');
   writeLine('             肯定條件匹配任一值，-not/-not-contains 排除整個集合；不同條件取交集。--q 跨欄搜尋，');
   writeLine('             只想比對單一欄請用 --title-contains / --description-contains。');
   writeLine('  ltj show <ticket>                       工單詳情（ticket 可用 UUID / 工單 key / 數字 key）');

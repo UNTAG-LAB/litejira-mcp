@@ -1,6 +1,6 @@
 {
   "name": "litejira-mcp",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "讓 AI 助手（Claude Code / Cursor）直接讀寫 LiteJira 2.0 工單系統的 MCP server（對外 REST API v1）",
   "type": "commonjs",
   "bin": {
@@ -15,6 +15,8 @@
     "litejira-mcp-launch.cjs",
     "litejira-mcp-server.js",
     "litejira-v1-transport.js",
+    "litejira-config.js",
+    "litejira-setup.js",
     "ltj-cli.js",
     "scripts/smoke-stdio-readonly.cjs",
     "README.md",

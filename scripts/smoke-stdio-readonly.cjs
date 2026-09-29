@@ -7,9 +7,9 @@
 // 這支打**你自己設定的那台**，用來在發版前確認「這個版本對這台伺服器真的通」。
 //
 // 憑證：**本檔不含也不寫入任何憑證**，一律從環境變數讀，並且不印出來。
-//   LTJ_API_URL    必填，例：https://litejira.untaglab.com
 //   LTJ_API_TOKEN  必填，你自己的 PAT
-//   LTJ_PROJECT    必填（本腳本要求明給，不猜專案）
+//   LTJ_API_URL    選填，未設＝正式站 https://litejira.untaglab.com
+//   LTJ_PROJECT    正式站未設＝預設主專案 MAIN；自訂站台必填（不猜專案）
 //   LTJ_SMOKE_TICKET  選填，一張你看得到的工單參照（UUID / BUG-481 / 數字）。
 //                     沒給就用搜尋結果的第一張；搜不到就略過需要工單的那幾項。
 //
@@ -21,6 +21,8 @@
 
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+
+const { resolveSettings } = require('../litejira-config');
 
 const SERVER = path.join(__dirname, '..', 'litejira-mcp-server.js');
 const TIMEOUT_MS = 30000;
@@ -107,11 +109,18 @@ function toolData(result, label) {
 }
 
 async function main() {
+  // token 一定要自己給；站台與專案沿用 litejira-config 的裁決
+  //（正式站 → 預設主專案；自訂站台沒有預設，仍要明給 LTJ_PROJECT）。
+  const settings = resolveSettings(process.env);
   const env = {
-    LTJ_API_URL: requireEnv('LTJ_API_URL'),
+    LTJ_API_URL: settings.apiUrl,
     LTJ_API_TOKEN: requireEnv('LTJ_API_TOKEN'),
-    LTJ_PROJECT: requireEnv('LTJ_PROJECT')
+    LTJ_PROJECT: settings.project
   };
+  if (!env.LTJ_PROJECT) {
+    console.error('站台 ' + settings.apiUrl + ' 沒有內建預設專案；請設定 LTJ_PROJECT（本腳本不猜專案）');
+    process.exit(2);
+  }
   console.log('目標：' + env.LTJ_API_URL + '  專案：' + env.LTJ_PROJECT + '（唯讀；權杖不印出）\n');
 
   const client = startClient(env);

@@ -12,91 +12,77 @@
 舊後端只有一個 POST 端點、權杖放在 request body 裡；2.0 是一整套 REST 路由 ＋ `Authorization: Bearer`。
 兩者的權限模型與錯誤碼都不同，本版**沒有也不會有 fallback**：指向舊後端只會拿到一堆 `invalid_response`。
 
-| | 2.x（舊） | 3.0（本版） |
+| | 2.x（舊） | 3.x（本版） |
 |---|---|---|
 | 後端 | Google Apps Script `/exec` | LiteJira 2.0 REST `/api/v1` |
-| `LTJ_API_URL` | Apps Script 部署網址 | **`https://litejira.untaglab.com`** |
+| `LTJ_API_URL` | Apps Script 部署網址 | **`https://litejira.untaglab.com`**（3.1 起是預設，可省略） |
 | 權杖 | 同一把 `ltj_pat_` | **同一把，不用換** |
 | 送法 | POST body 裡的欄位 | `Authorization: Bearer` 標頭 |
 | 冪等 | 只是客戶端約定，伺服器不去重 | 伺服器真的去重（`Idempotency-Key` 標頭，24 小時保留期） |
 | 工單識別 | 只有 `BUG-481` | UUID 主鍵 ＋ 公開 key，兩者都收 |
 | 成員條件 | 收顯示名 | **只收 UUID**（先讀 `litejira://members`） |
 
-**升級只要做兩件事**：把 `LTJ_API_URL` 換成 `https://litejira.untaglab.com`、加一行 `LTJ_PROJECT`（見下）。
+**升級只要做一件事**：把 `LTJ_API_URL` 換成 `https://litejira.untaglab.com`（或整行刪掉，3.1 起預設就是它）。
 權杖沿用既有的 `ltj_pat_`，不必重辦。
 
 ---
 
-## 安裝（一句指令）
+## 安裝與設定（兩步）
 
-> 前提：Node.js 18 以上。
-
-**推薦：全域安裝**（更新最穩，避開 `npx` 快取與多開 session 兩個已知坑）
+> 前提：Node.js 18 以上。你只需要一把 PAT，不用填網址、不用填專案。
 
 ```bash
-npm install -g litejira-mcp
+npm install -g litejira-mcp@latest
+litejira-mcp setup
+```
+
+`setup` 會在**你自己的終端機**問你的 PAT（輸入時畫面只顯示 `*`），先連線驗證、通過才寫入
+`~/.litejira/credentials.env`（本機使用者目錄）。預設連正式站 `https://litejira.untaglab.com`，
+預設專案是目前的主專案 `MAIN`。
+
+**PAT 哪裡來**：找 admin 在 LiteJira webapp「設定 → 存取權杖」幫你建一把（`ltj_pat_xxxxx`）。
+從 2.x 升上來的人沿用原本那把即可。
+
+> 🔐 **權杖請在自己的終端機輸入，不要貼進 AI 對話視窗。**
+> `setup` 需要互動式終端機；被 AI 工具代跑或接管線時會直接拒絕並告訴你怎麼自己跑。
+> 實際能讀寫哪些工單，仍以你在 LiteJira 的個人權限為準。
+
+### 在 AI 工具註冊 MCP
+
+Claude Code：
+
+```bash
 claude mcp add litejira --scope user -- litejira-mcp
 ```
 
-**快速：用 npx**（免全域安裝，但多開 session 偶爾連不上、更新需清快取）
+其他 MCP host（Cursor / ChatGPT Desktop 等）：在設定檔填 `command: litejira-mcp`、`args: []`。
 
-```bash
-claude mcp add litejira --scope user -- npx -y litejira-mcp@latest
+```json
+"litejira": { "command": "litejira-mcp", "args": [] }
 ```
 
-裝完設定一次權杖（見下），重啟 AI 工具即可用。
+裝完重啟 AI 工具即可用。
+
+### 想請 AI 幫你裝
+
+把這句話貼給 AI：
+
+> 請幫我安裝並設定 LiteJira MCP，Token 由我在本機輸入；完成後查詢最新工單驗證。
+
+AI 會幫你跑安裝與註冊，`setup` 那一步會回到你的終端機由你自己輸入 PAT。
 
 ---
 
 ## 更新（一句指令）
-
-全域安裝者：
 
 ```bash
 npm update -g litejira-mcp
 ```
 
 然後完全關閉並重新打開你的 AI 工具。沒有手動拉檔、不用清快取。
+已設定過的權杖不受影響，不必重跑 `setup`。
 
-> npx 安裝者：`npx` 會快取舊版，重啟未必更新到最新；請將啟動指令固定為 `npx -y litejira-mcp@3.0.0` 後重啟，或改用上面的全域安裝。
-
----
-
-## 設定權杖（一次性）
-
-1. 找 admin 在 LiteJira webapp「設定 → Token」幫你建一把 PAT（`ltj_pat_xxxxx`）。
-   **從 2.x 升上來的人不用換權杖**，原本那把繼續用。
-2. 在你電腦的家目錄建檔 `~/.litejira/credentials.env`：
-
-**Mac / Linux**
-```bash
-mkdir -p ~/.litejira
-cat > ~/.litejira/credentials.env << 'EOF'
-LTJ_API_URL=https://litejira.untaglab.com
-LTJ_API_TOKEN=<貼你的 ltj_pat_ 權杖>
-LTJ_PROJECT=<你的專案 key>
-LTJ_MCP_ENABLE_WRITES=true
-EOF
-```
-
-**Windows（PowerShell）**
-```powershell
-New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.litejira"
-@"
-LTJ_API_URL=https://litejira.untaglab.com
-LTJ_API_TOKEN=<貼你的 ltj_pat_ 權杖>
-LTJ_PROJECT=<你的專案 key>
-LTJ_MCP_ENABLE_WRITES=true
-"@ | Set-Content "$env:USERPROFILE\.litejira\credentials.env"
-```
-
-> `LTJ_API_URL` 是正式站 `https://litejira.untaglab.com`（自架另一套的人才需要改）。
-> 只接受 `https://`，唯一例外是本機 loopback 的 `http://localhost`（開發用）。
->
-> 可選：`LTJ_MCP_MAX_UPLOAD_BYTES=<位元組>` 調整附件上傳上限（預設 25 MiB，天花板 100 MiB）。
-> 不設就用預設；設成範圍外的值會在啟動時明確報錯，不會靜默退回預設。
->
-> 權杖只存在你電腦上、不進 git。離職或不用了，找 admin 在 webapp 撤銷。
+> 用 `npx` 啟動的人：`npx` 會快取舊版，重啟未必更新到最新；請改用上面的全域安裝。
 
 ---
 
@@ -104,27 +90,47 @@ LTJ_MCP_ENABLE_WRITES=true
 
 跟 AI 說：「用 LiteJira 搜尋最新的 BUG」。看到工單列表 = 成功。
 
-要更確定一點（**唯讀，不會寫到任何東西**），對你自己那台跑一遍連線檢查：
+要更確定一點（**唯讀，不會寫到任何東西**），跑一遍連線檢查：
 
 ```bash
-LTJ_API_URL=https://litejira.untaglab.com \
-LTJ_API_TOKEN=<你的權杖> \
-LTJ_PROJECT=<你的專案 key> \
-  node scripts/smoke-stdio-readonly.cjs
+LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 ```
 
 它會用真正的 stdio 通道跑一遍握手、20 個工具的清單、6 個資源、4 個提示與 4 個讀取工具，
 逐項印出 ✔ / ✖，全過回 exit 0。腳本本身不含也不寫入任何憑證，只從環境變數讀，而且不把權杖印出來。
+（自訂站台請另外給 `LTJ_API_URL` 與 `LTJ_PROJECT`。）
 
-## 進階：dev / prod 雙環境（維護者用）
+---
 
-一般使用者忽略本段。若你要同時連正式與測試兩套 LiteJira，啟動器接受一個環境參數：
+## 進階：自訂站台、專案與唯讀模式
 
-| 指令 | 讀哪個 credentials |
+一般使用者忽略本段。以下設定都寫在 `~/.litejira/credentials.env`（或直接用環境變數），
+**既有設定一律優先於內建預設**，`setup` 也不會覆蓋它們。
+
+| 設定 | 預設 | 說明 |
+|------|------|------|
+| `LTJ_API_URL` | `https://litejira.untaglab.com` | 自架站才需要改。只接受 `https://`，唯一例外是本機 loopback 的 `http://localhost`（開發用） |
+| `LTJ_PROJECT` | 正式站＝`MAIN`；**自訂站台沒有預設** | 預設專案 key。不是祕密，只是一個專案代號 |
+| `LTJ_MCP_ENABLE_WRITES` | `true` | 設 `false` 變唯讀。其他值（`1`、`yes`、打錯字）一律當成唯讀並在 stderr 警告 |
+| `LTJ_MCP_MAX_UPLOAD_BYTES` | 25 MiB | 附件上傳上限，天花板 100 MiB。設範圍外的值會明確報錯，不靜默退回預設 |
+
+**自訂站台一定要自己設 `LTJ_PROJECT`**：我們不知道那台有哪些專案，猜一個只會把工單投錯地方，
+所以沒設就明確報錯。臨時換專案：資源帶 `?project=OTHER`（例 `litejira://meta?project=OTHER`），
+工具帶 `project` 參數——兩者都優先於預設值。
+
+> 「不帶專案就是搜尋全部」**不存在**。唯一能跨專案的查詢是「我的」：搜尋時帶
+> `mine=assignee|creator|watcher`，而且跨專案時伺服器**不接受任何其他篩選條件**（要篩選就得指定專案）。
+> 跨專案的「我的」查詢也**不會**被套上預設專案——那會偷偷把「我的全部」縮成一個專案。
+
+### dev / prod 雙環境（維護者用）
+
+若你要同時連正式與測試兩套 LiteJira，啟動器與 `setup` 都接受一個環境參數：
+
+| 指令 | 讀 / 寫哪個 credentials |
 |------|-------------------|
-| `litejira-mcp` | `~/.litejira/credentials.env`（預設） |
-| `litejira-mcp dev` | `~/.litejira/credentials.dev.txt`（找不到再試 `.dev.env`） |
-| `litejira-mcp prod` | `~/.litejira/credentials.prod.txt`（找不到再試 `.prod.env`） |
+| `litejira-mcp` / `litejira-mcp setup` | `~/.litejira/credentials.env`（預設） |
+| `litejira-mcp dev` / `litejira-mcp setup dev` | `~/.litejira/credentials.dev.txt`，找不到用 `.dev.env` |
+| `litejira-mcp prod` / `litejira-mcp setup prod` | `~/.litejira/credentials.prod.txt`，找不到用 `.prod.env` |
 
 `.mcp.json` 範例（兩條並存）：
 ```json
@@ -132,27 +138,11 @@ LTJ_PROJECT=<你的專案 key> \
 "litejira-dev": { "command": "litejira-mcp", "args": ["dev"] }
 ```
 
----
+### 從 3.0 升上來要注意
 
-## 設定預設專案 `LTJ_PROJECT`（3.0 起幾乎是必填）
-
-LiteJira 2.0 的**工單查詢、元資料、版本、統計、工作流都是專案層級**的：沒有專案範圍，伺服器一律回
-「請指定專案」而不是回全部。在 credentials 檔加一行就不用每次指定：
-
-```
-LTJ_PROJECT=<你的專案 key>
-```
-
-**專案 key 去哪裡拿**：LiteJira webapp 的「專案設定」頁上就寫著（也是網址上那一段）。
-不確定就問 admin；本版**不會**自動挑一個專案給你——猜錯會安靜回錯專案的資料，比報錯危險得多。
-
-臨時換專案：資源帶 `?project=OTHER`（例 `litejira://meta?project=OTHER`），工具帶 `project` 參數。
-
-> 「不帶專案就是搜尋全部」**不存在**（2.x 的說明曾這樣寫，是錯的）。
-> 唯一能跨專案的查詢是「我的」：搜尋時帶 `mine=assignee|creator|watcher`，
-> 而跨專案時伺服器**不接受任何其他篩選條件**（要篩選就得指定專案）。
-
-`LTJ_PROJECT` 不是祕密，只是一個專案代號。
+- **寫入預設改為開啟**：3.0 需要明寫 `LTJ_MCP_ENABLE_WRITES=true` 才能寫；3.1 起不設就是可寫。
+  要維持唯讀請明寫 `LTJ_MCP_ENABLE_WRITES=false`。
+- `LTJ_API_URL` / `LTJ_PROJECT` 變成可省略，但你既有的設定會原樣保留、繼續生效。
 
 ---
 
@@ -278,15 +268,15 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | 批量做完說「有幾張失敗」 | 正常：批量是部分成功。看失敗清單的原因（多半是狀態不符或權限），修正後只重送那幾張 |
 | AI 說「改狀態要用動作名稱」 | 正常：一般狀態變更一律走流轉（說「送 alpha 測試」這類動作名），不是直接寫狀態欄位 |
 | AI 說「狀態改不了」但查得到工單 | 改狀態只收**動作名稱**（如「開始開發」），不是目標狀態名；讓 AI 先查可用動作 |
-| `unauthenticated` | 確認 `~/.litejira/credentials.env` 的權杖沒打錯，或請 admin 換一把 |
+| `unauthenticated` / 說少了 token | 重跑 `litejira-mcp setup`（會先驗證再保存），或請 admin 換一把 PAT |
 | `membership_required` / `permission_denied` | 前者是你不在該專案，後者是角色權限不足 → 找 admin |
-| 說「請指定專案」 | credentials.env 加 `LTJ_PROJECT=<key>`（專案 key 在 webapp 的專案設定頁），或在資源 URI 帶 `?project=<key>` |
+| 說「請指定專案」 | 連正式站時預設就是主專案 `MAIN`；會看到這句多半是你設了自訂 `LTJ_API_URL`。在 credentials.env 加 `LTJ_PROJECT=<key>`，或在資源 URI 帶 `?project=<key>` |
 | 說「跨專案查詢不接受一般篩選」 | 跨專案只能查「我的」。要篩選就指定專案（`statusNot` / `titleContains` / `overdue` / `id` 也都算篩選） |
 | 說「overdue 只接受布林值」 | `overdue` 只認 `true` / `false`；`"yes"`、`1` 一律拒絕（打錯字與明確指定要分得出來） |
 | 說「id 一次最多 50 個值」 | `id` 是指名查詢不是翻頁：超過 50 張請改用篩選條件＋ `cursor` 分頁 |
 | 大量 `invalid_response`（不是 JSON） | `LTJ_API_URL` 可能還指著舊的 Apps Script 後端。3.x 只連 `https://litejira.untaglab.com` 這類 2.0 REST 站 |
 | 寫入回逾時 / 5xx / `in_progress`，不知道成功沒 | **先讀工單現況**再說。要重送就用同一把 idempotencyKey ＋ 完全相同的輸入，且在 24 小時內；不要換新 key |
-| `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |
+| `WRITES_DISABLED` | 3.1 起寫入預設開啟，會看到這個代表 `LTJ_MCP_ENABLE_WRITES` 被設成 `false` 或設成了 `true`/`false` 以外的值（打錯字一律當唯讀）。拿掉那一行或改成 `true` |
 | 上傳說 `file_too_large` | 檔案超過上限（預設 25 MiB）。調 `LTJ_MCP_MAX_UPLOAD_BYTES`（天花板 100 MiB），或改附連結 |
 | 上傳說 `file_not_regular` / `file_empty` | 路徑指到的是目錄或 0 byte 檔。確認路徑，或等檔案寫完再傳 |
 | 上傳說 `file_unreadable` | 路徑不存在或沒有讀取權限（server 是在**你這台機器**上讀檔） |

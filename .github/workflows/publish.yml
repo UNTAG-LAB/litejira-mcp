@@ -1,0 +1,105 @@
+name: publish
+
+# 發版管線：push 正式版 tag（vX.Y.Z）就跑；workflow_dispatch 可對同一個 tag 重跑。
+# 判斷邏輯都在 scripts/release-verify.cjs，這裡只負責串步驟。
+# 驗證細節與一次性設定：docs/releasing.md
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要重跑的正式版 tag（例 v3.1.1）'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# 全套件發布串行，避免不同版本同時爭用 latest；已執行的發布不取消。
+concurrency:
+  group: publish-litejira-mcp
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    timeout-minutes: 15
+    if: github.repository == 'UNTAG-LAB/litejira-mcp'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 驗證 tag 輸入格式
+        shell: bash
+        run: node -e 'if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(process.env.RELEASE_TAG || "")) process.exit(1)'
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # 本套件無 runtime 相依、也刻意沒有 lockfile，所以不跑 npm ci。
+      - name: preflight（tag 格式 / 對版本 / commit 在 origin/main）
+        id: preflight
+        run: node scripts/release-verify.cjs preflight
+
+      - name: 全測試
+        run: npm test
+
+      - name: npm pack
+        run: npm pack
+
+      - name: pack-verify（隔離安裝 → 真的啟動跑唯讀 smoke）
+        run: node scripts/release-verify.cjs pack-verify --tarball litejira-mcp-${{ steps.preflight.outputs.version }}.tgz
+
+  publish:
+    timeout-minutes: 15
+    needs: verify
+    if: github.repository == 'UNTAG-LAB/litejira-mcp'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # 只有這個 job 需要 OIDC（trusted publisher + provenance）
+    steps:
+      - name: 驗證 tag 輸入格式
+        shell: bash
+        run: node -e 'if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(process.env.RELEASE_TAG || "")) process.exit(1)'
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: preflight
+        id: preflight
+        run: node scripts/release-verify.cjs preflight
+
+      - name: npm pack
+        run: npm pack
+
+      # npm 版本檢查（trusted publisher 需 >= 11.5.1）＋ registry 已有同版時的去重判斷。
+      - name: publish-precheck
+        id: precheck
+        run: node scripts/release-verify.cjs publish-precheck --tarball litejira-mcp-${{ steps.preflight.outputs.version }}.tgz
+
+      # 憑證來自 OIDC trusted publisher，這裡不設也不需要 NODE_AUTH_TOKEN。
+      - name: npm publish
+        if: steps.precheck.outputs.should-publish == 'true'
+        run: npm publish litejira-mcp-${{ steps.preflight.outputs.version }}.tgz --access public --provenance
+
+      - name: registry-verify（退避確認 integrity/latest → 公開安裝再 smoke）
+        run: node scripts/release-verify.cjs registry-verify --tarball litejira-mcp-${{ steps.preflight.outputs.version }}.tgz

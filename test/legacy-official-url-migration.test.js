@@ -244,6 +244,8 @@ test('setup：驗證失敗 / 取消時，舊網址的憑證檔一個字都不能
   const failCode = await runSetup([], {
     env: {},
     dir: failDir,
+    home: failDir,
+    register: false,
     stdin: fakeStdin('bad_token\r'),
     stdout: collector(),
     stderr: failErr,
@@ -261,6 +263,8 @@ test('setup：驗證失敗 / 取消時，舊網址的憑證檔一個字都不能
   const cancelCode = await runSetup([], {
     env: {},
     dir: cancelDir,
+    home: cancelDir,
+    register: false,
     stdin: fakeStdin('abc'),
     stdout: collector(),
     stderr: collector(),

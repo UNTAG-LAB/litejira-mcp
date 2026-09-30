@@ -137,7 +137,7 @@ litejira-mcp setup --client auto --json    # 既有憑證會自動沿用並重�
 ```jsonc
 {
   "ok": true,
-  "clients": [{ "client": "codex", "configured": true, "stdioVerified": true, "serverVersion": "3.2.0" }],
+  "clients": [{ "client": "codex", "configured": true, "stdioVerified": true, "serverVersion": "3.2.1" }],
   "hostReloadRequired": true   // 設定寫好了；主機是否已載入不在本工具掌握範圍
 }
 ```

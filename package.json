@@ -1,6 +1,6 @@
 {
   "name": "litejira-mcp",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "讓 Codex、Claude Code、Gemini CLI 自動設定並讀寫 LiteJira 工單的 MCP server；安裝後執行 litejira-mcp setup，詳見 README",
   "type": "commonjs",
   "bin": {

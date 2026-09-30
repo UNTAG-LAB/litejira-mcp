@@ -60,7 +60,7 @@ token 來源優先序：`--token-stdin` > `LTJ_API_TOKEN` / `LTJ_API_PAT` 環境
 ```jsonc
 {
   "ok": true,
-  "package": { "name": "litejira-mcp", "version": "3.2.0" },
+  "package": { "name": "litejira-mcp", "version": "3.2.1" },
   "credentialsFile": "/home/me/.litejira/credentials.env",
   "command": "/usr/local/bin/node",
   "args": ["/usr/local/lib/node_modules/litejira-mcp/litejira-mcp-launch.cjs"],
@@ -69,7 +69,7 @@ token 來源優先序：`--token-stdin` > `LTJ_API_TOKEN` / `LTJ_API_PAT` 環境
       "client": "codex",
       "configured": true,        // 設定檔已寫好
       "stdioVerified": true,     // 那條指令真的起得來、協定通、唯讀查詢成功
-      "serverVersion": "3.2.0",
+      "serverVersion": "3.2.1",
       "files": [{ "scope": "user", "file": "…/config.toml", "status": "replaced" }]
     }
   ],

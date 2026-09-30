@@ -1,7 +1,7 @@
 {
   "name": "litejira-mcp",
-  "version": "3.1.2",
-  "description": "讓 AI 助手（Claude Code / Cursor）直接讀寫 LiteJira 2.0 工單系統的 MCP server（對外 REST API v1）",
+  "version": "3.2.0",
+  "description": "讓 Codex、Claude Code、Gemini CLI 自動設定並讀寫 LiteJira 工單的 MCP server；安裝後執行 litejira-mcp setup，詳見 README",
   "type": "commonjs",
   "bin": {
     "litejira-mcp": "litejira-mcp-launch.cjs"
@@ -17,8 +17,12 @@
     "litejira-v1-transport.js",
     "litejira-config.js",
     "litejira-setup.js",
+    "litejira-hosts.js",
+    "litejira-toml-edit.js",
+    "litejira-doctor.js",
     "ltj-cli.js",
     "scripts/smoke-stdio-readonly.cjs",
+    "docs/ai-setup.md",
     "README.md",
     "LICENSE"
   ],
@@ -29,6 +33,8 @@
     "mcp",
     "model-context-protocol",
     "litejira",
+    "codex",
+    "gemini",
     "claude",
     "claude-code"
   ],

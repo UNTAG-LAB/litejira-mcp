@@ -75,20 +75,56 @@ function resolveCredFile() {
 // `litejira-mcp setup [prod|dev]`：互動式設定 token，不啟動 MCP server。
 // 放在讀憑證之前分流，因為 setup 自己要決定要更新哪個檔。
 const SUB = (process.argv[2] || '').toLowerCase();
+function reportCommandFailure(command, err) {
+  // Raw exception messages can contain paths or configuration excerpts with secrets.
+  const safeCodes = ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'EIO', 'ENOSPC'];
+  const report = {
+    ok: false,
+    error: 'internal_error',
+    errorCode: err && safeCodes.includes(err.code) ? err.code : null,
+    partiallyApplied: command === 'setup' ? null : false,
+    mutationState: command === 'setup' ? 'unknown' : 'unchanged',
+    hostReloadRequired: true,
+    message: command === 'setup'
+      ? '設定作業遇到檔案或執行錯誤；變更狀態未能確認。請 AI 檢查設定與備份，不要假稱零變更。'
+      : '唯讀診斷遇到檔案或執行錯誤；本次診斷未寫入設定。'
+  };
+  if (command === 'doctor' || process.argv.slice(3).includes('--json')) {
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+  } else {
+    process.stderr.write(report.message + (report.errorCode ? '（' + report.errorCode + '）' : '') + '\n');
+  }
+  process.exit(1);
+}
 if (SUB === 'setup') {
   require('./litejira-setup')
     .runSetup(process.argv.slice(3))
     .then((code) => { process.exit(code); })
     .catch((err) => {
-      process.stderr.write('setup 失敗：' + (err && err.message ? err.message : String(err)) + '\n');
-      process.exit(1);
+      reportCommandFailure('setup', err);
+    });
+  return;
+}
+// `litejira-mcp doctor`：讀主機設定檔裡實際寫的指令並實測啟動（唯讀），輸出結構化結果。
+if (SUB === 'doctor') {
+  require('./litejira-doctor')
+    .runDoctor(process.argv.slice(3))
+    .then((result) => {
+      process.stdout.write(JSON.stringify(result.report, null, 2) + '\n');
+      process.exit(result.code);
+    })
+    .catch((err) => {
+      reportCommandFailure('doctor', err);
     });
   return;
 }
 if (SUB === 'help' || SUB === '--help' || SUB === '-h') {
   process.stdout.write(
     '用法：\n' +
-    '  litejira-mcp setup [prod|dev]   互動式輸入並驗證 PAT，寫入 ~/.litejira/\n' +
+    '  litejira-mcp setup [prod|dev] [--client codex|claude|gemini|auto] [--token-stdin] [--json]\n' +
+    '                                  驗證 PAT → 寫入 ~/.litejira/ → 註冊進 AI 主機的 MCP 設定檔\n' +
+    '  litejira-mcp doctor [--client …] [--json]\n' +
+    '                                  讀主機設定檔裡實際的 command/args 並實測啟動（唯讀）\n' +
     '  litejira-mcp [prod|dev]         啟動 MCP server（由 AI 工具呼叫，走 stdio）\n'
   );
   process.exit(0);

@@ -31,49 +31,75 @@
 
 ---
 
-## 安裝與設定（兩步）
+## 安裝（交給 AI 做完）
 
-> 前提：Node.js 18 以上。你只需要一把 PAT，不用填網址、不用填專案。
+> 前提：Node.js 18 以上。你要做的只有兩件事：**叫你的 AI 裝**、**把 PAT 交給它**。
+> 不用編輯任何設定檔、不用自己跑 `claude mcp add`、不用重打一次 token。
+
+把這段貼給你的 AI 助手（Codex CLI / Claude Code / Gemini CLI 都適用）：
+
+> 請幫我安裝 LiteJira MCP：
+> `npm install -g litejira-mcp@latest`，
+> 然後把我的 PAT 從 stdin 餵給 `litejira-mcp setup --client auto --token-stdin --json`
+> （`--json` 的 stdout 就是一份 JSON，直接 parse；人看的進度在 stderr），
+> 再跑 `litejira-mcp doctor --client auto` 確認。
+> 最後請你自己試著重載／重連你所在的這個主機，並實際呼叫一次 litejira 的唯讀工具確認能用；
+> 真的做不到（例如你的主機沒有重載機制）才回頭叫我手動重啟，並說清楚卡在哪一步。
+
+PAT：`ltj_pat_xxxxx`，找 admin 在 LiteJira webapp「設定 → 存取權杖」建一把；2.x 升上來的沿用原本那把。
+
+AI 端完整的指令契約、退出碼與 JSON 欄位在 [`docs/ai-setup.md`](docs/ai-setup.md)。
+
+### AI 會跑的兩條指令
 
 ```bash
 npm install -g litejira-mcp@latest
-litejira-mcp setup
+
+# 取得 PAT → 連線驗證 → 寫入 ~/.litejira/credentials.env（0600）→ 註冊進 AI 主機設定檔
+printf '%s' "$LITEJIRA_PAT" | litejira-mcp setup --client auto --token-stdin --json
+
+# 讀主機設定檔裡實際的 command/args，實際啟動一次做唯讀驗證
+litejira-mcp doctor --client auto
 ```
 
-`setup` 會在**你自己的終端機**問你的 PAT（輸入時畫面只顯示 `*`），先連線驗證、通過才寫入
-`~/.litejira/credentials.env`（本機使用者目錄）。預設連正式站 `https://litejira.untaglab.com`，
-預設專案是目前的主專案 `MAIN`。
+`setup` 一次做完四件事：**preflight 所有目標設定檔 → 用 API 驗證 token → 寫入憑證 → 註冊 MCP**。
 
-**PAT 哪裡來**：找 admin 在 LiteJira webapp「設定 → 存取權杖」幫你建一把（`ltj_pat_xxxxx`）。
-從 2.x 升上來的人沿用原本那把即可。
+零變更的保證只涵蓋**寫入之前**：preflight 或 token 驗證沒過，就整批停下來，憑證與主機設定檔一個字都沒動。
+一旦開始寫入（憑證已驗證通過）之後才失敗 —— 例如某個主機設定被停用、或啟動驗證跑不過 ——
+那就是「已經改過，但沒有全部成功」的狀態；輸出會標記 `partiallyApplied: true`，
+每個被改過的檔案旁邊都有 `.litejira-backup-*` 備份可以還原。
 
-> 🔐 **權杖請在自己的終端機輸入，不要貼進 AI 對話視窗。**
-> `setup` 需要互動式終端機；被 AI 工具代跑或接管線時會直接拒絕並告訴你怎麼自己跑。
-> 實際能讀寫哪些工單，仍以你在 LiteJira 的個人權限為準。
+支援的主機與它們的官方設定檔（`--client auto` 會偵測已安裝的那些）：
 
-### 在 AI 工具註冊 MCP
+| `--client` | 檔案 | 寫進去的內容 |
+|---|---|---|
+| `codex` | `~/.codex/config.toml`（尊重 `CODEX_HOME`） | `[mcp_servers.litejira]` 的 `command` / `args` |
+| `claude` | `~/.claude.json`（尊重 `CLAUDE_CONFIG_DIR`，它指的是放 `.claude.json` 的**目錄**）的 `mcpServers`；同時更新會遮蔽它的 `projects[cwd].mcpServers` 與專案 `.mcp.json`（僅限已存在的 litejira 項目） | `mcpServers.litejira` |
+| `gemini` | `~/.gemini/settings.json`（尊重 `GEMINI_CLI_HOME`，它是 **HOME 的替身**，設定仍在其下的 `.gemini/`）的 `mcpServers`；專案 `.gemini/settings.json` 已有 litejira 時一併更新 | `mcpServers.litejira` |
 
-Claude Code：
+**只接手「怎麼啟動」，不碰「准不准跑」。** 既有項目裡的政策設定 —— Codex 的 `enabled`、
+`enabled_tools` / `disabled_tools`、`[mcp_servers.litejira.tools]`、逾時；Gemini 的
+`includeTools` / `excludeTools` / `trust`；Claude 的 `disabled`、`disabledMcpjsonServers`；
+以及任何我們不認得的鍵、註解與排版 —— 一律原樣保留。被清掉的只有兩類：與 stdio 互斥的舊傳輸欄位
+（`url` / `type` / `headers` …）和會蓋過新憑證的 `LTJ_API_TOKEN` / `LTJ_API_PAT` 與已退役的站台網址。
+被明確停用（`enabled = false`、`disabledMcpjsonServers`）時，setup 會如實回報並**不算成功**，
+也不會替你改成啟用；Gemini 的 `mcp.allowed` / `mcp.excluded` 管理者限制則一律零變更、原因照實講。
 
-```bash
-claude mcp add litejira --scope user -- litejira-mcp
-```
+寫進去的啟動指令是 **目前這個 node 的絕對路徑 + 本套件 launcher 的絕對路徑**
+（不依賴 PATH，Windows / macOS 的 GUI 主機也起得來），舊的 `litejira-mcp` 或
+`~/.litejira/mcp/...` 這種殘留項目會被就地換掉，不會多出第二份。
 
-其他 MCP host（Cursor / ChatGPT Desktop 等）：在設定檔填 `command: litejira-mcp`、`args: []`。
+> 🔐 **token 只走 stdin 或環境變數，絕不進 argv、輸出或任何設定檔**，驗證通過才寫進
+> `~/.litejira/credentials.env`（權限 0600）。實際能讀寫哪些工單，仍以你在 LiteJira 的個人權限為準。
+>
+> ⚠️ **setup 無法替你重載 AI 主機。** 設定檔寫好了不等於執行中的 Codex / Claude Code / Gemini
+> 已經載入它 —— 何時重讀設定不在本工具掌握範圍。`setup` 與 `doctor` 的輸出一律帶
+> `hostReloadRequired: true`，請依該主機的方式重連或重啟後再用 litejira 工具。
 
-```json
-"litejira": { "command": "litejira-mcp", "args": [] }
-```
+### 想自己在終端機跑
 
-裝完重啟 AI 工具即可用。
-
-### 想請 AI 幫你裝
-
-把這句話貼給 AI：
-
-> 請幫我安裝並設定 LiteJira MCP，Token 由我在本機輸入；完成後查詢最新工單驗證。
-
-AI 會幫你跑安裝與註冊，`setup` 那一步會回到你的終端機由你自己輸入 PAT。
+直接執行 `litejira-mcp setup`（不帶 `--token-stdin`）就會互動詢問 PAT，輸入時畫面只顯示 `*`。
+其餘行為與 AI 代跑完全相同。
 
 ---
 
@@ -84,7 +110,17 @@ npm update -g litejira-mcp
 ```
 
 然後完全關閉並重新打開你的 AI 工具。沒有手動拉檔、不用清快取。
-已設定過的權杖不受影響，不必重跑 `setup`。
+
+**更新後請再跑一次 `setup`**：套件的安裝路徑會隨版本改變，主機設定檔裡那條啟動指令
+（舊版可能還指向 `~/.litejira/mcp/...` 或別的安裝位置）不會自己跟著更新。
+
+```bash
+litejira-mcp setup --client auto --json    # 既有憑證會自動沿用並重新驗證，不用再貼一次 PAT
+```
+
+已設定過的權杖不受影響：本機憑證檔裡有 token 時，`setup` 會直接拿它重新驗證，
+不會（也不該）要求你把 PAT 再交出來一次。想確認有沒有必要重跑，可以先跑
+`litejira-mcp doctor --client auto`：它會比對主機設定檔啟動到的版本與目前套件版本。
 
 > 用 `npx` 啟動的人：`npx` 會快取舊版，重啟未必更新到最新；請改用上面的全域安裝。
 
@@ -94,7 +130,21 @@ npm update -g litejira-mcp
 
 跟 AI 說：「用 LiteJira 搜尋最新的 BUG」。看到工單列表 = 成功。
 
-要更確定一點（**唯讀，不會寫到任何東西**），跑一遍連線檢查：
+沒看到工具就先跑 `litejira-mcp doctor --client auto`（唯讀）。它會把主機設定檔裡**實際寫的**
+`command` / `args` 讀出來、照樣啟動一次，跑 `initialize` → `tools/list` → `litejira://meta` →
+一次唯讀搜尋，並確認回報的版本與這個套件一致，輸出結構化 JSON：
+
+```jsonc
+{
+  "ok": true,
+  "clients": [{ "client": "codex", "configured": true, "stdioVerified": true, "serverVersion": "3.2.0" }],
+  "hostReloadRequired": true   // 設定寫好了；主機是否已載入不在本工具掌握範圍
+}
+```
+
+退出碼：0 全過、1 有項目沒過、2 參數或偵測不到主機。憑證一律被遮蔽，不會出現在輸出或錯誤訊息裡。
+
+要對**你自己那台站台**再確定一點（**唯讀，不會寫到任何東西**），跑一遍連線檢查：
 
 ```bash
 LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
@@ -136,11 +186,9 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 | `litejira-mcp dev` / `litejira-mcp setup dev` | `~/.litejira/credentials.dev.txt`，找不到用 `.dev.env` |
 | `litejira-mcp prod` / `litejira-mcp setup prod` | `~/.litejira/credentials.prod.txt`，找不到用 `.prod.env` |
 
-`.mcp.json` 範例（兩條並存）：
-```json
-"litejira":     { "command": "litejira-mcp", "args": ["prod"] },
-"litejira-dev": { "command": "litejira-mcp", "args": ["dev"] }
-```
+`setup prod --client …` 註冊出來的項目會帶對應的參數（`args` 是
+`[<launcher 絕對路徑>, "prod"]`），不需要自己編設定檔。`setup` 只管 `litejira` 這一個別名：
+要另外留一條 `litejira-dev`，那條就由你自己維護 —— 本工具不會動它，也不會刪它。
 
 ### 從 3.0 升上來要注意
 
@@ -270,7 +318,7 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 
 | 症狀 | 解法 |
 |------|------|
-| AI 說找不到 litejira 工具 | 重啟 AI 工具；確認 `claude mcp add` 跑成功 |
+| AI 說找不到 litejira 工具 | 跑 `litejira-mcp doctor --client auto`：`configured: false` → 重跑 `setup`；`stdioVerified: true` 但工具仍看不到 → 主機還沒重載設定，重連或重啟該 AI 工具 |
 | 批量做完說「有幾張失敗」 | 正常：批量是部分成功。看失敗清單的原因（多半是狀態不符或權限），修正後只重送那幾張 |
 | AI 說「改狀態要用動作名稱」 | 正常：一般狀態變更一律走流轉（說「送 alpha 測試」這類動作名），不是直接寫狀態欄位 |
 | AI 說「狀態改不了」但查得到工單 | 改狀態只收**動作名稱**（如「開始開發」），不是目標狀態名；讓 AI 先查可用動作 |

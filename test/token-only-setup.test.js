@@ -57,6 +57,10 @@ test('token-only setup：驗證成功後寫入憑證檔，token 不出現在 std
   const code = await runSetup([], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin(TOKEN + '\r'),
     stdout: out,
     stderr: err,
@@ -85,6 +89,10 @@ test('驗證失敗不覆寫既有憑證', async function () {
   const code = await runSetup([], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin('bad_token\r'),
     stdout: collector(),
     stderr: err,
@@ -105,6 +113,10 @@ test('Ctrl+C 取消：不寫檔、回非零', async function () {
   const code = await runSetup([], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin('abc'),
     stdout: collector(),
     stderr: err,
@@ -124,6 +136,10 @@ test('直接 Enter 沿用既有 token（仍會重新驗證）', async function (
   const code = await runSetup([], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin('\r'),
     stdout: out,
     stderr: collector(),
@@ -145,6 +161,10 @@ test('沒有輸入任何 token 且沒有既有 token：不寫檔', async functio
   const code = await runSetup([], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin('\r'),
     stdout: collector(),
     stderr: err,
@@ -155,7 +175,7 @@ test('沒有輸入任何 token 且沒有既有 token：不寫檔', async functio
   assert.match(err.text(), /沒有輸入 token/);
 });
 
-test('非 TTY：明確失敗並給出可行替代做法，不寫檔', async function () {
+test('非 TTY 且沒有任何 token 來源：明確失敗並指向 --token-stdin，不寫檔', async function () {
   const dir = tmpDir();
   const err = collector();
   const stdin = new EventEmitter();
@@ -163,14 +183,18 @@ test('非 TTY：明確失敗並給出可行替代做法，不寫檔', async func
   const code = await runSetup(['prod'], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: stdin,
     stdout: collector(),
     stderr: err,
     fetch: async function () { throw new Error('不該驗證'); }
   });
   assert.equal(code, 2);
-  assert.match(err.text(), /TTY/);
-  assert.match(err.text(), /litejira-mcp setup prod/);
+  assert.match(err.text(), /--token-stdin/);
+  assert.match(err.text(), /LTJ_API_TOKEN/);
   assert.equal(fs.readdirSync(dir).length, 0);
 });
 
@@ -180,6 +204,10 @@ test('自訂站台沒有預設專案時，setup 要求先設定 LTJ_PROJECT', as
   const code = await runSetup([], {
     env: { LTJ_API_URL: 'https://jira.internal.example' },
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin(TOKEN + '\r'),
     stdout: collector(),
     stderr: err,
@@ -203,6 +231,10 @@ test('prod / dev 走各自的憑證檔；既有 .txt 就地更新不另開新檔
   const code = await runSetup(['dev'], {
     env: {},
     dir: dir,
+    // 這一檔只測憑證那一段：註冊主機設定有自己的測試檔，這裡明確關掉，
+    // 才不會在跑測試時去碰執行者真正的 ~/.codex、~/.claude.json、~/.gemini。
+    register: false,
+    home: dir,
     stdin: fakeStdin(TOKEN + '\r'),
     stdout: collector(),
     stderr: collector(),
@@ -219,7 +251,7 @@ test('無法辨識的參數被拒絕；--help 走說明', async function () {
   const dir = tmpDir();
   const err = collector();
   assert.equal(await runSetup(['staging'], { env: {}, dir: dir, stdin: fakeStdin(''), stdout: collector(), stderr: err }), 2);
-  assert.match(err.text(), /只接受 prod 或 dev/);
+  assert.match(err.text(), /無法辨識的參數「staging」/);
 
   const out = collector();
   assert.equal(await runSetup(['--help'], { env: {}, dir: dir, stdin: fakeStdin(''), stdout: out, stderr: collector() }), 0);

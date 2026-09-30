@@ -185,6 +185,9 @@ test('setup：舊正式站憑證檔只有網址也能走完，並把新網址保
   const code = await runSetup([], {
     env: {},
     dir: dir,
+    // 這一檔測的是憑證檔的網址遷移；註冊 AI 主機設定另有專屬測試，這裡關掉以免碰到真實家目錄。
+    register: false,
+    home: dir,
     stdin: fakeStdin(TOKEN + '\r'),
     stdout: out,
     stderr: err,
@@ -215,6 +218,9 @@ test('setup：舊網址來自環境變數時也遷移，並提醒環境變數要
   const code = await runSetup([], {
     env: { LTJ_API_URL: LEGACY_URL },
     dir: dir,
+    // 這一檔測的是憑證檔的網址遷移；註冊 AI 主機設定另有專屬測試，這裡關掉以免碰到真實家目錄。
+    register: false,
+    home: dir,
     stdin: fakeStdin(TOKEN + '\r'),
     stdout: out,
     stderr: collector(),
@@ -270,6 +276,9 @@ test('setup：不認得的 GAS 站台講清楚是站台問題，不是叫人去�
   const code = await runSetup([], {
     env: { LTJ_API_URL: OTHER_GAS_URL },
     dir: dir,
+    // 這一檔測的是憑證檔的網址遷移；註冊 AI 主機設定另有專屬測試，這裡關掉以免碰到真實家目錄。
+    register: false,
+    home: dir,
     stdin: fakeStdin(TOKEN + '\r'),
     stdout: collector(),
     stderr: err,
@@ -292,7 +301,7 @@ test('自訂 GAS 已指定專案仍可驗證，網址與專案不被遷移', asy
   const dir = tmpDir();
   const seen = [];
   const code = await runSetup([], {
-    env: { LTJ_API_URL: OTHER_GAS_URL, LTJ_PROJECT: 'CUSTOM' }, dir,
+    env: { LTJ_API_URL: OTHER_GAS_URL, LTJ_PROJECT: 'CUSTOM' }, dir, register: false, home: dir,
     stdin: fakeStdin(TOKEN + '\r'), stdout: collector(), stderr: collector(), fetch: okFetch(seen)
   });
   assert.equal(code, 0);
@@ -306,7 +315,7 @@ test('setup prod 優先更新既有 txt，環境網址優先於檔案且保留�
   fs.writeFileSync(file, 'LTJ_API_URL=https://custom.example\nLTJ_PROJECT=OTHER\nLTJ_MCP_ENABLE_WRITES=false\n');
   const seen = [];
   const code = await runSetup(['prod'], {
-    env: { LTJ_API_URL: LEGACY_URL }, dir,
+    env: { LTJ_API_URL: LEGACY_URL }, dir, register: false, home: dir,
     stdin: fakeStdin(TOKEN + '\r'), stdout: collector(), stderr: collector(), fetch: okFetch(seen)
   });
   assert.equal(code, 0);

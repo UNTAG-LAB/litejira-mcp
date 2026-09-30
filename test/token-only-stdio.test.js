@@ -157,10 +157,13 @@ test('launcher 分流：--help 與 setup --help 直接輸出說明，不啟動 s
   assert.ok(/不要、也不應該貼進 AI 對話視窗|不需要、也不應該貼進 AI 對話視窗/.test(setupHelp.stdout), setupHelp.stdout);
 });
 
-test('launcher 分流：非 TTY 下的 setup 明確失敗，不寫檔也不啟動 server', async function () {
+// 非 TTY 不再是「拒絕」——AI 代跑是支援的路徑。但偵測不到任何 AI 主機時仍要明確失敗，
+// 不能假裝註冊成功，也絕不能因此改去啟動 MCP server。
+test('launcher 分流：偵測不到主機時 setup 明確失敗，不寫檔也不啟動 server', async function () {
   const result = await runLauncher(['setup'], cleanEnv({ LTJ_API_TOKEN: TOKEN }));
   assert.strictEqual(result.code, 2);
-  assert.ok(/TTY/.test(result.stderr), result.stderr);
+  assert.ok(/--client/.test(result.stderr), result.stderr);
+  assert.ok(/未變更任何設定/.test(result.stderr), result.stderr);
   assert.strictEqual(result.stdout.indexOf('"jsonrpc"'), -1, '不該啟動 MCP server');
 });
 

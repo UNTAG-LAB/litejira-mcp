@@ -197,6 +197,50 @@ test('GH-313：流轉工具講明「main不受影響」這個前進動作也必�
   assert.match(reply.inputSchema.properties.transition.description, /main不受影響/);
 });
 
+test('GH-313：說明不再宣稱「其餘前進類動作可省略 reason」，而是講明 requiresReason 資料驅動', function () {
+  const tools = listTools();
+  const single = tools.find((t) => t.name === 'litejira.transitionTicket');
+  const batch = tools.find((t) => t.name === 'litejira.batchTransition');
+  const reply = tools.find((t) => t.name === 'litejira.replyFeedback');
+  const getTransitions = tools.find((t) => t.name === 'litejira.getTransitions');
+
+  // 舊說明的核心錯誤：暗示「退回類 + main不受影響」是 reason 必填的全部情況，
+  // 其餘前進類一律可省略——GH-306 之後這不成立，requiresReason 由流程設定決定。
+  for (const def of [single, batch]) {
+    assert.ok(!/其餘前進類動作可省略/.test(def.inputSchema.properties.reason.description),
+      def.name + ' 的 reason 說明仍宣稱其餘前進類動作一律可省略：' +
+        def.inputSchema.properties.reason.description);
+    assert.match(def.inputSchema.properties.reason.description, /requiresReason/);
+  }
+  assert.match(single.description, /requiresReason/);
+  assert.match(reply.inputSchema.properties.transition.description, /requiresReason/);
+  // getTransitions 本身要講明這個欄位存在，且不能只靠方向／標籤猜
+  assert.match(getTransitions.description, /requiresReason/);
+});
+
+test('GH-313：reason 必填的三條 OR 規則（back／main不受影響／requiresReason=true）在四處說明一致，且不暗示 requiresReason=false 可省略前兩條', function () {
+  const tools = listTools();
+  const single = tools.find((t) => t.name === 'litejira.transitionTicket');
+  const batch = tools.find((t) => t.name === 'litejira.batchTransition');
+  const reply = tools.find((t) => t.name === 'litejira.replyFeedback');
+  const getTransitions = tools.find((t) => t.name === 'litejira.getTransitions');
+
+  const spots = [
+    single.description,
+    single.inputSchema.properties.reason.description,
+    batch.inputSchema.properties.reason.description,
+    reply.inputSchema.properties.transition.description,
+    getTransitions.description
+  ];
+
+  // 每處都要點名三條規則：退回方向、main不受影響、requiresReason 欄位。
+  for (const text of spots) {
+    assert.match(text, /back|退回/);
+    assert.match(text, /main不受影響/);
+    assert.match(text, /requiresReason/);
+  }
+});
+
 test('GH-313：帶了 reason 的前進流轉照常送出（本機不自作主張預判動作方向）', async function () {
   // 「這個動作要不要 reason」是資料相關的判定（要先知道動作的 direction），住在後端。
   // 本層只負責把說明講對，不在客戶端複製一份動作表 —— 複製的那份一定會過時。

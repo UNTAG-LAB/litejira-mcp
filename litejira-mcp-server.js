@@ -365,8 +365,9 @@ const TOOL_DEFS = [
         type: 'object',
         description: '可選的狀態流轉，會在留言「之前」執行。Shape: { action: string, reason?: string, fields?: object }。' +
           'action 是動作標籤（先呼叫 litejira.getTransitions 取 data.actions[] 的 label）；' +
-          'v1 不收目標狀態名（toStatus / status）。退回類動作與「main不受影響」要帶 reason，' +
-          '送測類動作的連帶欄位放 fields。'
+          'v1 不收目標狀態名（toStatus / status）。reason 必填＝以下三條命中任一：' +
+          'direction=back／label=「main不受影響」／該動作 requiresReason=true' +
+          '（後者為 false 不代表前兩條也不成立）。送測類動作的連帶欄位放 fields。'
       },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
@@ -697,15 +698,15 @@ const TOOL_DEFS = [
     }),
   // LJ-137 新增（2 個）：動作按鈕流轉對外化 + 查當前可用動作
   tool('litejira.transitionTicket',
-    'Perform a status transition via API v1 (POST /tickets/{ticketId}/transitions), WITH the workflow\'s automatic role-based reassignment (首次認領→操作者 / 回流→上一手開發者 / 前進→目標 role 預設人). Body is { action, reason?, fields?, expectedUpdatedAt? }. "action" is an ACTION LABEL, not a target status: call litejira.getTransitions FIRST and use a label from data.actions[] — v1 does NOT accept a target status name. REASON IS REQUIRED for every BACK-direction action (alpha不通過 / release不通過 / MR打回 / 退回 / 退單) AND for the one forward action「main不受影響」(the hotfix bypass — the audit trail has to say why main is unaffected); a blank reason is rejected with invalid_argument on field "reason". Extra fields required by the transition (e.g. the send-to-test trio) go in "fields".',
+    'Perform a status transition via API v1 (POST /tickets/{ticketId}/transitions), WITH the workflow\'s automatic role-based reassignment (首次認領→操作者 / 回流→上一手開發者 / 前進→目標 role 預設人). Body is { action, reason?, fields?, expectedUpdatedAt? }. "action" is an ACTION LABEL, not a target status: call litejira.getTransitions FIRST and use a label from data.actions[] — v1 does NOT accept a target status name. REASON IS REQUIRED whenever ANY of these three hold: (1) the action is BACK-direction (alpha不通過 / release不通過 / MR打回 / 退回 / 退單), (2) the action is the forward「main不受影響」bypass, or (3) litejira.getTransitions reports requiresReason=true for that action — condition (3) being false does NOT clear conditions (1)/(2); a blank reason is rejected with invalid_argument on field "reason". Extra fields required by the transition (e.g. the send-to-test trio) go in "fields".',
     'transitionTicket', true, {
       ticketId: P_TICKET_REF,
       action: { type: 'string', description: '動作標籤（如「開始開發」「送alpha測試」「alpha不通過」）。合法值依工單當前狀態而定，請先呼叫 litejira.getTransitions，取 data.actions[] 裡的標籤。' },
       reason: {
         type: 'string',
-        description: '異動原因，會記入工單歷程。**所有退回類動作必填**（說明哪裡不通過），' +
-          '另外前進類的「main不受影響」也必填（要說明 main 為何不受影響，供稽核）。其餘前進類動作可省略。' +
-          '空白字串等同沒填，伺服器會回 invalid_argument（field=reason）。'
+        description: '異動原因，會記入工單歷程。必填＝以下三條命中任一：退回類動作／' +
+          '前進類的「main不受影響」／該動作 getTransitions 回報 requiresReason=true' +
+          '（第三條為 false 不代表前兩條也可省略）。空白字串等同沒填，伺服器會回 invalid_argument（field=reason）。'
       },
       fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項與欄位名以 getTransitions 的回應與伺服器錯誤訊息為準。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
@@ -724,7 +725,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.getTransitions',
-    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read data.actions[] and pass an action label to litejira.transitionTicket. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels — never pass those to transitionTicket. The same labels are what litejira.batchTransition takes for a whole batch — check them against the CURRENT status of the tickets you are batching.',
+    'Get the currently available action-button transitions for a ticket via API v1 (GET /tickets/{ticketId}/transitions; no query parameters). The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key. Returns the contract object as-is — read data.actions[] and pass an action label to litejira.transitionTicket. Each action item carries requiresReason (boolean, workflow-config-driven, GH-306), but it is NOT the sole source of truth: reason is required whenever ANY of these three hold — direction=back, label=「main不受影響」, or requiresReason=true for that action — and requiresReason can be false even on a BACK-direction action, so a false value never overrides the first two rules. GH-253: any "transitions" array in the payload is NOT an action list; it is the backend validation whitelist of target STATUS names and its values differ from action labels — never pass those to transitionTicket. The same labels are what litejira.batchTransition takes for a whole batch — check them against the CURRENT status of the tickets you are batching.',
     'getAllowedTransitions', false, {
       ticketId: P_TICKET_REF
     }, ['ticketId'], {
@@ -743,8 +744,9 @@ const TOOL_DEFS = [
       action: { type: 'string', description: '動作標籤（如「送release測試」「alpha不通過」），對每張工單的當前狀態各自驗證；不合法的落在 failed[]。請先用 litejira.getTransitions 取 data.actions[] 的 label。' },
       reason: {
         type: 'string',
-        description: '異動原因（全批共用），會記入每張工單歷程。**所有退回類動作必填**，' +
-          '前進類的「main不受影響」也必填。其餘前進類動作可省略。沒帶時那幾張會整批落在 failed[]。'
+        description: '異動原因（全批共用），會記入每張工單歷程。必填＝以下三條命中任一：退回類動作／' +
+          '前進類的「main不受影響」／該動作 requiresReason=true（第三條為 false 不代表前兩條也可省略）。' +
+          '沒帶時那幾張會整批落在 failed[]。'
       },
       fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項以 getTransitions 的回應與伺服器錯誤為準。' },
       idempotencyKey: P_IDEMPOTENCY
@@ -1758,29 +1760,31 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           // GH-257 第四包：18 個工具全部接線，原本的「未接線」那一行退場（留著會讓助手不敢用已經可用的工具）；
           // 換上單欄更新的分流、批次的部分成功，以及 replyFeedback 非原子這三件會影響操作決策的事。
           instructions: [
-            'LiteJira MCP 操作規則（v1）：',
+            'LiteJira MCP v1：',
             '- 寫入必帶 idempotencyKey；去重限 24 小時內＋輸入相同：結果不明先讀狀態，' +
-              '用同一把 key 原輸入重送；換 key 或過期會再做一次。',
+              '同 key 原輸入重送；換 key 或過期才重做。',
             '- 建單填齊 reproSteps／expectedResult／日期／tags／ownerId 等正式欄位，別塞進 description。',
+            // GH-313：reason 必填是三選一命中即算（direction=back／label=main不受影響／
+            // requiresReason=true），第三項為 false 不代表可省略前兩項。
             '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[].label' +
-              '（退回類與「main不受影響」帶 reason）。',
+              '（退回／main不受影響／requiresReason=true 任一必填 reason）。',
             '- updateField 單欄：status 要 force=true（限管理者），assigneeId 要 reason，版本／父工單收 UUID。',
-            '- batch 收 tickets（1-100）；回 succeeded/failed，200 不代表全成功，務必回報 failed。',
+            '- batch 收 tickets（1-100）；回 succeeded/failed，200 非全成功，務必回報 failed。',
             '- replyFeedback 非原子：先流轉再留言，各一把衍生鍵；失敗如實回報部分成功。',
             // GH-317：只留會改變操作決策的兩件（URL 可不可以貼給人、上傳不能重試），
             // 欄位與認證細節在兩個工具的 schema 裡——預算不因新功能而放寬，其餘行同步壓縮。
             '- 附件：getAttachments 的 links.web 可貼給人、links.api 需 Bearer；' +
-              '上傳無冪等鍵，結果不明先對帳不重送。',
+              '上傳無冪等鍵，先對帳不重送。',
             '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（會撞假衝突）。',
             '- 工單參照可用 UUID／BUG-481／數字 key；成員條件只收 UUID，先讀 litejira://members。',
             '- 讀 litejira://meta（受控值）／litejira://versions／litejira://workflow/{type}。',
-            '- 專案層級資源取 LTJ_PROJECT 或 URI 的 ?project=KEY；沒有就報錯，不猜。',
-            '- searchTickets 的 project 必填（同上），沒有「不帶＝全部」；' +
-              '唯一跨專案是 mine=assignee|creator|watcher，此時一般篩選不可帶。',
+            '- 專案層級資源取 LTJ_PROJECT 或 URI 的 ?project=KEY；無則報錯，不猜。',
+            '- searchTickets 的 project 必填（同上），無「不帶＝全部」；' +
+              '跨專案僅 mine=assignee|creator|watcher，此時不可帶一般篩選。',
             // GH-265 的 instructions 預算仍然成立（本行是換掉舊的「type/status 等可傳陣列多值」那一句，
             // 不是另開一行）：新增的能力只講「有哪些運算子」，細節在工具 schema 裡。
-            '- 清單用 limit+cursor 分頁（上限 100）；每維度可多值且有 XNot，' +
-              'title/description 有 XContains/XNotContains，另有 overdue、id（≤' + TICKET_ID_FILTER_MAX + '）。',
+            '- 清單用 limit+cursor 分頁（上限 100）；各維度可多值＋XNot，' +
+              'title/description 另有 XContains/XNotContains，還有 overdue、id（≤' + TICKET_ID_FILTER_MAX + '）。',
             '- activity 用 kind=user|system 過濾，不帶＝全部。'
           ].join('\n')
         }
@@ -2138,8 +2142,8 @@ function getPromptMessages_(name, args) {
             '再呼叫 litejira.getTransitions（ticketId=' + (ticket || '{id}') + '）取當前實際可用的動作，' +
             '以回應中 data.actions[] 的 label 為準；同一份回應裡的 transitions 是目標狀態白名單，不是動作名稱，別混用。' +
             '若一步到不了結案狀態，請列出完整的中間步驟順序讓我確認；我同意後再用 litejira.transitionTicket 一步一步執行，' +
-            '每一步都重新呼叫 getTransitions 取當下可用的動作標籤' +
-            '（退回類動作要帶 reason；前進類的「main不受影響」同樣必填 reason）。' +
+            '每一步都重新呼叫 getTransitions 取當下可用的動作標籤與各動作的 requiresReason' +
+            '（reason 必填＝退回類動作／「main不受影響」／requiresReason=true 三者之一命中即算）。' +
             WRITE_NOTE
         }
       }];

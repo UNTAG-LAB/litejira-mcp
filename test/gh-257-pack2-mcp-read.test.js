@@ -476,7 +476,10 @@ test('resource 的後端錯誤走 JSON-RPC error，code 維持後端原文', asy
   const response = await rpc('resources/read', { uri: 'litejira://meta' }, cfg(),
     errFetch(404, { code: 'not_found', message: '專案不存在', details: { project: 'LTJ' } }));
   assert.strictEqual(response.error.data.code, 'not_found');
-  assert.strictEqual(response.error.message, '專案不存在');
+  // GH-360：後端原文仍是訊息開頭（不改寫、不吞掉）；其後接的是與工具入口同一支的 hint。
+  assert.ok(response.error.message.startsWith('專案不存在'), response.error.message);
+  // 這是專案層的 404，指引只給通用的反查路徑，不談工單參照格式。
+  assert.doesNotMatch(response.error.message, /前綴/);
   assert.deepStrictEqual(response.error.data.details, { project: 'LTJ' });
 });
 

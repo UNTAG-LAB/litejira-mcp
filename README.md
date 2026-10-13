@@ -150,7 +150,7 @@ litejira-mcp setup --client auto --json    # 既有憑證會自動沿用並重�
 LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 ```
 
-它會用真正的 stdio 通道跑一遍握手、23 個工具的清單、7 個資源、4 個提示與 4 個讀取工具，
+它會用真正的 stdio 通道跑一遍握手、26 個工具的清單、8 個資源、4 個提示與 4 個讀取工具，
 逐項印出 ✔ / ✖，全過回 exit 0。腳本本身不含也不寫入任何憑證，只從環境變數讀，而且不把權杖印出來。
 （自訂站台請另外給 `LTJ_API_URL` 與 `LTJ_PROJECT`。）
 
@@ -202,7 +202,7 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 
 ## 能做什麼
 
-> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，23 個工具都能用。
+> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，26 個工具都能用。
 > 三件要知道的事：
 > 1. **批量操作是「部分成功」的**：一次處理 N 張，伺服器會回「成功哪幾張、失敗哪幾張」，
 >    整體回應成功不代表每張都改到了。AI 應該把失敗清單如實講給你聽。
@@ -341,6 +341,18 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | 多開 session 時連不上 | 改用全域安裝（`npm i -g`），不要用 npx |
 
 零外部相依，只需 Node.js 18+。
+
+### 工單關聯（被擋住／擋住等）
+
+網站工單的「加關聯」記錄工單與工單之間的關係，與外部連結、父子工單都不同：
+
+- `litejira.listTicketRelations({ticketId})` 或 `litejira://ticket/{id}/relations`：讀這張單的全部關聯，回傳 `items`，每筆含 `kind`、`direction` 與對象單的編號、標題、狀態。
+- `litejira.addTicketRelation({ticketId, kind, targetId, idempotencyKey})`：讀作「`ticketId` `kind` `targetId`」。例：`kind: "blocked_by"` 表示 ticketId 被 targetId 擋住（MR 要等它先合）。成對的語意會自動在對象單寫上反向（`blocked_by` ↔ `blocks`）；`duplicates` 是單向，指向被保留的那張。
+- `litejira.removeTicketRelation({ticketId, kind, targetId, idempotencyKey})`：關聯沒有自己的 id，以這三欄定位；兩側同時解除，回傳剩餘 `items`。
+
+十種 `kind`：`relates`、`duplicates`、`implements`、`implemented_by`、`blocks`、`blocked_by`、`starts_before`、`starts_after`、`finishes_before`、`finishes_after`。依賴只記錄，不約束日期、也不擋狀態流轉。
+
+新增要有本單的編輯權限（擁有者範圍照舊）與對象單的檢視權限；同一對同一語意重複建立回 409。`idempotencyKey` 只送 HTTP header；遇到逾時或不確定結果時，先列出關聯確認，必要重試只在24小時內沿用同一識別碼與完全相同輸入，工具不自動重試。
 
 ## License
 

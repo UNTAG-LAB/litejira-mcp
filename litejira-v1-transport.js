@@ -425,6 +425,29 @@ const ACTION_MAP = Object.freeze({
     query: Object.freeze({ allow: Object.freeze([]) }),
     contractRef: 'DELETE /api/v1/tickets/{ticketId}/links/{linkId}'
   }),
+  // GH-372：工單關聯三支。關聯沒有自己的 id，以（本單、語意、對象單）三欄定位，所以解除把三者都放在路徑上。
+  listTicketRelations: Object.freeze({
+    method: 'GET', pathTemplate: '/tickets/{ticketId}/relations',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    contractRef: 'GET /api/v1/tickets/{ticketId}/relations'
+  }),
+  addTicketRelation: Object.freeze({
+    method: 'POST', pathTemplate: '/tickets/{ticketId}/relations',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['kind', 'targetId']), required: Object.freeze(['kind', 'targetId']),
+      string: Object.freeze(['kind', 'targetId'])
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/relations'
+  }),
+  removeTicketRelation: Object.freeze({
+    method: 'DELETE', pathTemplate: '/tickets/{ticketId}/relations/{kind}/{targetId}',
+    pathParams: Object.freeze(['ticketId', 'kind', 'targetId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    contractRef: 'DELETE /api/v1/tickets/{ticketId}/relations/{kind}/{targetId}'
+  }),
   attachLink: Object.freeze({
     method: 'POST',
     pathTemplate: '/tickets/{ticketId}/attachments',

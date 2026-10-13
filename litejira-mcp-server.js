@@ -138,6 +138,17 @@ const P_CREATE_DATE = (label) => ({
 const P_LIMIT = { type: 'integer', description: 'Max results (1-100，客戶端上限). 超過上限請改用 cursor 分頁。', minimum: 1, maximum: 100 };
 const P_CURSOR = { type: 'string', description: '分頁 cursor（從前一次回應的 nextCursor 帶入）' };
 const P_ORDER = { type: 'string', description: 'Sort order：asc 或 desc', enum: ENUM_ORDER };
+// GH-372：工單關聯的十種語意（與後端 RELATION_KINDS 逐字對應；後端仍是最終裁決者）。
+// 讀法一律是「ticketId <kind> targetId」。
+const ENUM_RELATION_KIND = ['relates', 'duplicates', 'implements', 'implemented_by', 'blocks', 'blocked_by',
+  'starts_before', 'starts_after', 'finishes_before', 'finishes_after'];
+const P_RELATION_KIND = {
+  type: 'string',
+  enum: ENUM_RELATION_KIND,
+  description: '關聯語意，讀作「ticketId <kind> targetId」：blocked_by＝被對象擋住、blocks＝擋住對象、' +
+    'relates＝相關、duplicates＝重複（指向被保留的那張）、implements／implemented_by＝實作／被實作、' +
+    'starts_before／starts_after／finishes_before／finishes_after＝早於／晚於對象開始或完成（只記錄，不約束日期）。'
+};
 const P_IDEMPOTENCY = {
   type: 'string',
   description: 'Idempotency key（16-64 字元 alphanumeric / _ / -），以 Idempotency-Key header 送出。' +
@@ -403,6 +414,30 @@ const TOOL_DEFS = [
       ticketId: P_TICKET_REF, linkId: { type: 'string', description: 'listTicketLinks回傳的連結UUID。' }, idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'linkId', 'idempotencyKey'], { title: '移除工單連結', destructiveHint: true, idempotentHint: true },
     { v1: { action: 'removeTicketLink' } }),
+  // GH-372：工單與工單之間的關聯（網站「加關聯」那顆按鈕：被擋住／擋住／重複／實作…）。
+  // 與 ticket links（外部網址）、linkTickets（父子）是三種不同的東西。
+  tool('litejira.listTicketRelations',
+    'List ALL ticket-to-ticket relations of one ticket (the web UI "Add relation" button: blocked_by / blocks / relates / duplicates / implements / starts_before ...), via GET /tickets/{ticketId}/relations. Returns {items:[{kind,direction,ticket:{id,key,type,title,status,stateGroup,isFinal},createdAt,createdBy}]}, unpaginated. direction=outgoing means "this ticket --kind--> ticket"; incoming only appears for duplicates. These are NOT external links (listTicketLinks) and NOT parent/child (linkTickets). Tickets the caller cannot see are omitted without placeholders.',
+    'listTicketRelations', false, { ticketId: P_TICKET_REF }, ['ticketId'],
+    { title: '列出工單關聯（被擋住／擋住等）' }, { v1: { action: 'listTicketRelations' } }),
+  tool('litejira.addTicketRelation',
+    'Add one relation between two tickets via POST /tickets/{ticketId}/relations, body {kind,targetId}. Read it as "ticketId <kind> targetId": e.g. kind=blocked_by means ticketId is blocked by targetId (its MR must wait for targetId). Paired kinds are written on both sides automatically (blocked_by on A also creates blocks on B; implements/implemented_by and the four time dependencies likewise); duplicates is one-way and points at the ticket that is kept. Dependencies never enforce dates or block status transitions. Requires edit permission on ticketId (owner scope applies) and view permission on targetId. Same pair + same kind again returns 409 state_conflict. Requires idempotencyKey; on an uncertain response first listTicketRelations, then retry only with the same key and identical input within 24 hours.',
+    'addTicketRelation', true, {
+      ticketId: P_TICKET_REF,
+      kind: P_RELATION_KIND,
+      targetId: { type: 'string', description: '對象工單：UUID、公開 key（如 REQ-2333）或純數字 key。', pattern: TICKET_REF_PATTERN },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'kind', 'targetId', 'idempotencyKey'], { title: '加入工單關聯', idempotentHint: true },
+    { v1: { action: 'addTicketRelation' } }),
+  tool('litejira.removeTicketRelation',
+    'Remove one ticket relation via DELETE /tickets/{ticketId}/relations/{kind}/{targetId}. A relation has no id of its own: it is identified by (ticketId, kind, targetId) exactly as listTicketRelations shows it from the ticketId side (direction=outgoing). Exception: duplicates is one-way, so an item with direction=incoming cannot be removed from this ticket; remove it from the other ticket instead (DELETE {other}/relations/duplicates/{this}), which needs edit permission on that other ticket. Both sides of a paired relation are removed together. Returns {items:[remaining relations of ticketId]}, HTTP 200. A relation that does not exist returns not_found. Requires idempotencyKey; after an uncertain response, listTicketRelations first, then retry only with the same key and identical input within 24 hours.',
+    'removeTicketRelation', true, {
+      ticketId: P_TICKET_REF,
+      kind: P_RELATION_KIND,
+      targetId: { type: 'string', description: '對象工單：UUID、公開 key 或純數字 key（同 listTicketRelations 的 ticket.key 或 ticket.id）。', pattern: TICKET_REF_PATTERN },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'kind', 'targetId', 'idempotencyKey'], { title: '移除工單關聯', destructiveHint: true, idempotentHint: true },
+    { v1: { action: 'removeTicketRelation' } }),
   tool('litejira.attachLink',
     'Attach a reference URL (doc, design, external page) to a ticket via API v1 (POST /tickets/{ticketId}/attachments). For the UI Add link section and MR/PR use addTicketLink instead. Body is exactly { url, name? } — v1 attachments have no "kind" classification. Returns the created attachment; keep its "id" — that id (NOT the url) is what litejira.removeAttachment needs.',
     'attachLink', true, {
@@ -866,7 +901,7 @@ const RESOURCE_DEFS = [
   },
   {
     uriTemplate: 'litejira://ticket/{id}', name: '工單詳情',
-    description: '單張工單資料。{id} 可用 UUID 主鍵、公開 key（BUG-481）或純數字 key。新版 MR／PR 與通用連結另讀 litejira://ticket/{id}/links 或 listTicketLinks；mrUrl 僅是舊欄位，並非完整連結清單。',
+    description: '單張工單資料。{id} 可用 UUID 主鍵、公開 key（BUG-481）或純數字 key。新版 MR／PR 與通用連結另讀 litejira://ticket/{id}/links 或 listTicketLinks；mrUrl 僅是舊欄位，並非完整連結清單。工單之間的關聯（被擋住／擋住等）另讀 litejira://ticket/{id}/relations 或 listTicketRelations。',
     action: 'getTicket', needsProject: false, query: [],
     paramMap: (path) => ({ ticket: decodeURIComponent(path.split('/').pop()) })
   },
@@ -874,6 +909,14 @@ const RESOURCE_DEFS = [
     uriTemplate: 'litejira://ticket/{id}/links', name: '工單連結（含 MR／PR）',
     description: '與網站「加連結」共用的完整外部連結清單 {items:[...]}，kind=mr 是 MR／PR。不是附件；舊 mrUrl 另見工單詳情。',
     action: 'listTicketLinks', needsProject: false, query: [],
+    paramMap: (path) => ({ ticketId: decodeURIComponent(path.split('/').slice(-2)[0]) })
+  },
+  {
+    // GH-372：與網站「加關聯」共用的工單關聯清單
+    uriTemplate: 'litejira://ticket/{id}/relations', name: '工單關聯（被擋住／擋住等）',
+    description: '這張單與其他工單的全部關聯 {items:[{kind,direction,ticket:{id,key,title,status,...}}]}。' +
+      'kind=blocked_by 表示這張被 ticket 擋住、blocks 表示這張擋住 ticket。不是外部連結、也不是父子。',
+    action: 'listTicketRelations', needsProject: false, query: [],
     paramMap: (path) => ({ ticketId: decodeURIComponent(path.split('/').slice(-2)[0]) })
   }
 ];
@@ -1648,10 +1691,15 @@ async function uploadAttachmentTool_(input, cfg, fetchImpl) {
   };
 }
 
+// GH-372：關聯寫入結果未知時的指引（與工單連結同一套：先回讀、再用原 key 原輸入重送）
+const RELATION_OUTCOME_UNKNOWN = '工單關聯寫入結果未知；先用 listTicketRelations 回讀確認，若需重試，僅能在24小時內使用原idempotencyKey與完全相同輸入。';
+
 // 共用的 v1 呼叫 + 錯誤轉譯。回 { value } 或 MCP 的 isError 結果。
 // idempotencyKey 只有寫入路由會用到；讀取路由給了也不會掛上去（傳輸層決定）。
 async function callV1Or_(action, params, cfg, fetchImpl, idempotencyKey) {
   const ticketLinkWrite = action === 'addTicketLink' || action === 'removeTicketLink';
+  // GH-372：關聯寫入同樣不能把「結果未知」說成失敗——呼叫端換 key 重送會變成第二次寫入
+  const ticketRelationWrite = action === 'addTicketRelation' || action === 'removeTicketRelation';
   const fetchFn = fetchImpl || globalThis.fetch;
   if (!fetchFn) throw mcpError_('CONFIG_ERROR', 'fetch is required; use Node 18+ or pass fetchImpl');
   let result;
@@ -1669,12 +1717,18 @@ async function callV1Or_(action, params, cfg, fetchImpl, idempotencyKey) {
       if (ticketLinkWrite && err.status >= 500) {
         throw mcpError_('write_outcome_unknown', '工單連結寫入結果未知；先用 listTicketLinks 回讀確認，若需重試，僅能在24小時內使用原idempotencyKey與完全相同輸入。', { cause: err.code }, -32000);
       }
+      if (ticketRelationWrite && err.status >= 500) {
+        throw mcpError_('write_outcome_unknown', RELATION_OUTCOME_UNKNOWN, { cause: err.code }, -32000);
+      }
       // 後端裁決：code / message / details 原樣轉出，不重新編碼、不映射回舊的四種代碼。
       return apiErrorResult_(err);
     }
     if (err instanceof LiteJiraTransportError) {
       if (ticketLinkWrite && ['timeout', 'network_error', 'invalid_response', 'aborted'].includes(err.code)) {
         throw mcpError_('write_outcome_unknown', '工單連結寫入結果未知；先用 listTicketLinks 回讀確認，若需重試，僅能在24小時內使用原idempotencyKey與完全相同輸入。', { cause: err.code }, -32000);
+      }
+      if (ticketRelationWrite && ['timeout', 'network_error', 'invalid_response', 'aborted'].includes(err.code)) {
+        throw mcpError_('write_outcome_unknown', RELATION_OUTCOME_UNKNOWN, { cause: err.code }, -32000);
       }
       // 本機拒絕 / 連線層失敗：code 與 API 錯誤碼刻意不同名，呼叫端一看就知道沒到後端。
       throw mcpError_(err.code, err.message, err.details, -32000);

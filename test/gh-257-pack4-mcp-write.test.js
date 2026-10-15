@@ -418,7 +418,7 @@ test('replyFeedback 只留言時只送一發 POST /comments，且不夾帶流轉
 
   assert.strictEqual(fetchImpl.calls.length, 1);
   assert.strictEqual(fetchImpl.calls[0].url, V1 + '/tickets/BUG-481/comments');
-  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].init.body), { body: '已修正' });
+  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].init.body), { body: '已修正', format: 'markdown' });
   assert.strictEqual(result.structuredContent.ok, true);
   assert.strictEqual(result.structuredContent.atomic, false);
   assert.deepStrictEqual(result.structuredContent.steps.map(function (s) { return s.step; }), ['comment']);
@@ -442,7 +442,7 @@ test('replyFeedback 帶 transition 時：先流轉、再留言，兩步的冪等
   assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].init.body), {
     action: '開始開發', reason: '接手', fields: { fixMethod: '改設定' }, expectedUpdatedAt: ISO
   });
-  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[1].init.body), { body: '已修正' });
+  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[1].init.body), { body: '已修正', format: 'markdown' });
 
   const keys = fetchImpl.calls.map(function (c) { return c.init.headers['Idempotency-Key']; });
   assert.notStrictEqual(keys[0], keys[1], '兩步的鍵必須互不相同');

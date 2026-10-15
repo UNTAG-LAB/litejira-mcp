@@ -76,12 +76,13 @@ test('GH-386／387：searchTickets 說明點名 view=compact 與 mrLinks', funct
   assert.match(d, /mrLinks/);
 });
 
-test('GH-385：留言相關說明不再宣稱 Markdown，並指向 bodyText', function () {
+test('GH-385／GH-428：留言說明寫明預設 Markdown 由伺服器轉換，並指向 bodyText', function () {
   const add = def('litejira.addComment').inputSchema.properties.body.description;
   const reply = def('litejira.replyFeedback').inputSchema.properties.content.description;
   for (const d of [add, reply]) {
     assert.doesNotMatch(d, /Markdown 支援/);
-    assert.match(d, /不支援 Markdown/);
+    // GH-428：伺服器開始收 format=markdown，說明改寫成「預設 Markdown」（3.5 寫的「不支援」已不成立）
+    assert.match(d, /預設 format=markdown/);
     // 審查 389 第二輪：跳脫由 MCP 依 format 統一做，說明指向 format、不再叫模型自己跳脫
     assert.match(d, /format=text/);
     assert.doesNotMatch(d, /< > & 會存成/);

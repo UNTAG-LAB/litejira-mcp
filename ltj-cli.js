@@ -4,7 +4,7 @@
 // 預設就是 v1，沒有 legacy 自動 fallback（第四包起 MCP server 也全部走 v1，沒有舊通道可退）。
 const {
   callV1,
-  commentBodyForWire,
+  commentFieldsForWire,
   COMMENT_FORMAT_VALUES,
   LiteJiraApiError,
   LiteJiraTransportError,
@@ -122,14 +122,18 @@ function parseCommand(argv) {
     const rawBody = options.values.body !== undefined ? options.values.body : options.values.content;
     const commentFormatOk = options.values.format === undefined ||
       COMMENT_FORMAT_VALUES.indexOf(options.values.format) !== -1;
+    // GH-385：與 MCP 同一支轉換。CLI 的預設維持 text（GH-428 只把 MCP 的預設改成 markdown）
+    const commentFields = commentFormatOk
+      ? commentFieldsForWire(rawBody, options.values.format === undefined ? 'text' : options.values.format)
+      : null;
     return Object.assign({}, base, {
       command: 'comment',
       action: 'addComment',
       params: compactParams_({
         ticketId: options.positionals[0],
-        // GH-385：與 MCP 同一支跳脫（--format 預設 text）。不合法值原樣往下帶 format，讓傳輸層白名單當面拒絕
-        body: commentFormatOk ? commentBodyForWire(rawBody, options.values.format) : rawBody,
-        format: commentFormatOk ? undefined : options.values.format,
+        // 不合法的 format 原樣往下帶，由伺服器當面拒絕（422 會列出可用值）
+        body: commentFields ? commentFields.body : rawBody,
+        format: commentFields ? commentFields.format : options.values.format,
         mentions: options.multi.mention,
         // 舊的流轉 / 樂觀鎖旗標在留言端點沒有對應欄位：原樣往下傳讓傳輸層明確拒絕，
         // 不能偷偷丟掉（丟掉會讓呼叫端誤以為狀態已跟著改）。
@@ -374,8 +378,8 @@ function printUsage_(writeLine) {
   writeLine('  ltj activity <ticket> [--limit 50] [--cursor <c>] [--order asc|desc] [--kind user|system]');
   writeLine('  ltj link <childId> <parentId-uuid|null> --idempotency-key <key> --yes');
   writeLine('             [--expected-updated-at <ISO8601 微秒字串，原樣回填讀取端的值>]');
-  writeLine('  ltj comment <ticketId> --body <text> [--format text|html] [--mention <uuid>]（可重複） --idempotency-key <key> --yes');
-  writeLine('             --format 預設 text：純文字自動跳脫 & 與 <、換行轉 <br>；html 原樣送出');
+  writeLine('  ltj comment <ticketId> --body <text> [--format text|markdown|html] [--mention <uuid>]（可重複） --idempotency-key <key> --yes');
+  writeLine('             --format 預設 text：純文字自動跳脫 & 與 <、換行轉 <br>；markdown 由伺服器轉換（含表格）；html 原樣送出');
   writeLine('  ltj attach <ticketId> <http(s) url> [--name <顯示名>] --idempotency-key <key> --yes');
   writeLine('');
   writeLine('注意：成員 / 父工單條件只收 UUID（--assignee-id、link 的 parentId 等），不從顯示名猜人；');

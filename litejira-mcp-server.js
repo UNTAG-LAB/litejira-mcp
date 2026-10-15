@@ -72,8 +72,12 @@ const ENUM_SORT = SORT_VALUES.slice();
 const ENUM_MINE = MINE_VALUES.slice();
 // LiteJira GH-385：留言的載體是消毒後的 HTML（後端 R-T18），不是 Markdown。
 // 舊說明寫「Markdown 支援」，助手因此送 `**粗體**` 期待渲染、讀回 `&gt;` 又以為資料壞了。
-const COMMENT_BODY_DESCRIPTION = '留言內容。伺服器以消毒後的 HTML 儲存：純文字可直接送（換行保留，' +
-  '< > & 會存成 HTML 實體，網頁照原字顯示）；要格式請送白名單內的 HTML（<p> <strong> <em> <code> <pre> <ul> <ol> <li> <a> 等）。' +
+// ⚠️ 伺服器把送來的字一律當 HTML 解析：純文字裡 `<` 緊接英文字母（`List<int>`、`x<y`）會被當成標籤消毒，
+// 後面的字直接遺失、讀回也救不回（LiteJira 寫入端既有缺口，另案）。說明據實要求呼叫端自己跳脫。
+const COMMENT_BODY_DESCRIPTION = '留言內容。伺服器一律當 HTML 解析並以消毒後的 HTML 儲存。' +
+  '純文字可直接送（換行保留；> 與 & 會存成 HTML 實體，網頁照原字顯示），' +
+  '但純文字裡的 < 一律先寫成 &lt;：< 緊接英文字母（例如 List<int>、x<y）會被當成標籤拿掉，後面的字會遺失且讀回救不回。' +
+  '要格式請送白名單內的 HTML（<p> <strong> <em> <code> <pre> <ul> <ol> <li> <a> 等）。' +
   '不支援 Markdown 語法（會原樣顯示）。讀回時請用 bodyText 取純文字，不要把 body 當純文字再送一次（會變成 &amp;gt;）。';
 // GH-257 第三包：releaseMethod 是 v1 的建單欄位，但值域由伺服器裁決 ——
 // 客戶端不寫死 enum（寫死會在後端新增值時把合法輸入擋在門外），只驗「非空字串」，受控值讀 litejira://meta。

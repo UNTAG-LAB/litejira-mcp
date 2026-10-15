@@ -82,6 +82,9 @@ test('GH-385：留言相關說明不再宣稱 Markdown，並指向 bodyText', fu
   for (const d of [add, reply]) {
     assert.doesNotMatch(d, /Markdown 支援/);
     assert.match(d, /不支援 Markdown/);
+    // 審查 389：< 緊接字母會在寫入端被當標籤吃掉，說明必須要求呼叫端先跳脫，不得宣稱 < 可原字讀回
+    assert.match(d, /< 一律先寫成 &lt;/);
+    assert.doesNotMatch(d, /< > & 會存成/);
     assert.match(d, /HTML/);
   }
   for (const name of ['litejira.listComments', 'litejira.getActivityLog']) {

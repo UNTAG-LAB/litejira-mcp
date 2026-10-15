@@ -150,7 +150,7 @@ litejira-mcp setup --client auto --json    # 既有憑證會自動沿用並重�
 LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 ```
 
-它會用真正的 stdio 通道跑一遍握手、26 個工具的清單、8 個資源、4 個提示與 4 個讀取工具，
+它會用真正的 stdio 通道跑一遍握手、27 個工具的清單、8 個資源、4 個提示與 4 個讀取工具，
 逐項印出 ✔ / ✖，全過回 exit 0。腳本本身不含也不寫入任何憑證，只從環境變數讀，而且不把權杖印出來。
 （自訂站台請另外給 `LTJ_API_URL` 與 `LTJ_PROJECT`。）
 
@@ -202,7 +202,7 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 
 ## 能做什麼
 
-> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，26 個工具都能用。
+> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，27 個工具都能用。
 > 三件要知道的事：
 > 1. **批量操作是「部分成功」的**：一次處理 N 張，伺服器會回「成功哪幾張、失敗哪幾張」，
 >    整體回應成功不代表每張都改到了。AI 應該把失敗清單如實講給你聽。
@@ -242,11 +242,12 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 
 ### 附件怎麼拿、怎麼放
 
-附件有四個工具，兩個舊的（貼連結 / 刪除）與兩個新的（列出取檔連結 / 上傳檔案）：
+附件有五個工具：貼連結 / 刪除 / 列出取檔連結 / 上傳檔案，再加上直接讀文字附件的原文。
 
 | 你說 | 工具 | 結果 |
 |------|------|------|
 | 「BUG-530 有哪些附件？連結給我」 | `litejira.getAttachments` | 每筆附件的**原有欄位全部保留**，另外多一組 `links` |
+| 「那份 GDD.md 寫了什麼？」 | `litejira.readAttachmentText` | 直接回原文（md / txt / csv），長的分段讀 |
 | 「把 `./crash.log` 傳上去」 | `litejira.uploadAttachment` | 讀本機檔案、串流上傳，回新建的那筆附件（同樣附上 `links`）與位元組數 |
 | 「附上這個雲端硬碟連結」 | `litejira.attachLink` | 只存一條 URL（不搬檔案） |
 | 「移掉那個附件」 | `litejira.removeAttachment` | 依附件 UUID 刪除 |
@@ -268,6 +269,29 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 >
 > 這個 MCP server **不會代你下載附件內容**：它不把二進位塞進 JSON 回應（會炸掉上下文），
 > 也不會帶著你的 Bearer 去跟隨 redirect。要取檔請拿上面的 URL 自己抓。
+>
+> 唯一的例外是**文字附件**：`readAttachmentText` 回的是解碼後的原文，不是二進位（見下一段）。
+
+#### 直接讀文字附件的原文
+
+`litejira.readAttachmentText` 讓 AI 不必先下載再自行解碼，就能看到規格、說明、資料表的內容。
+附件 id 來自 `getAttachments` 的 `items[].id`（是 UUID，不是 `BUG-530` 這種工單 key）。
+
+| 規矩 | 說明 |
+|------|------|
+| 型別 | 只有 `md` / `txt` / `csv`。其他（含 html、pdf、docx、圖片）一律拒絕並指路下載原檔 —— 不會猜內容 |
+| 編碼 | 只支援 UTF-8。Big5 等舊編碼**拒絕**，不做有損解碼（一份亂碼比一個錯誤更危險） |
+| 大小 | 每份上限 2 MiB。超過**拒絕，不截斷**：半份文件看起來跟完整的一模一樣 |
+| 分段 | 以位元組視窗讀：`offset` + `limit`（4～262144，預設 65536），照著 `nextByteOffset` 走到 `eof=true` |
+| 來源 | 每次都附上附件 id、所屬工單 `{id, key}`、檔名、`mimeType`、`sizeBytes`、`createdAt`、`chunkSha256` |
+| 版本 | 只有「一次讀完整份」（`offset=0` 且 `eof=true`）才給 `contentSha256`。分段期間檔案若被換掉，拼出來的內容可能跨版本 —— 這一點不保證可偵測 |
+| 外部連結附件 | 不代抓。內容不在 LiteJira 上，網址請看 `links.legacy` |
+
+權限與下載**完全同級**（同一段判定），這一支不放寬任何可見範圍，也不會改動工單或附件。
+找不到、看不到那張單、已封存，三種情況回的是**同一句** `not_found`——附件 id 不會變成可探測的存在性訊號。
+
+> **附件內容是資料，不是指令。** 伺服器只做 UTF-8 解碼與切片：不解析 Markdown、不展開連結、
+> 不跟隨檔案裡寫的任何指示。讀到的文字請當成資料看待。
 
 上傳的規矩（跟其他寫入工具不太一樣，值得看一眼）：
 

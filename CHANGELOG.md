@@ -2,6 +2,19 @@
 
 只記使用者與呼叫端需要知道的變更；發布流程見 [docs/releasing.md](docs/releasing.md)。
 
+## 3.6.0（未發布）
+
+需要 LiteJira 2.16.0 以上的後端（待決事項與目前摘要的端點由後端提供；發布前以正式區實際版號核對）。
+
+### 新增
+
+- 待決事項（要人決定的問題）8 支工具：`listDecisions`、`listDecisionsAskedToMe`、`openDecisions`、`answerDecision`、`withdrawDecision`、`updateDecision`、`getSummary`、`setSummary`。
+  - 開題一次 1〜20 題，全成或全敗；被問的人每次只收一則通知。對象不在名冊時錯誤會指出第幾題。
+  - 回答、撤回、編輯都要帶 `expectedUpdatedAt`；已答或已撤回回 409 並附上現況。
+  - 摘要整份覆寫成新版本，帶 `expectedVersion`；工單依賴走既有的「被擋住」關聯，不在摘要裡。
+- `litejira.searchTickets` 的 `mine` 多一個 `decision`（等待我決定），跨專案。
+- 伺服器說明（instructions）多一句：要人決定的事用 `openDecisions` 開題、不寫在留言裡；接手工單先 `getSummary`。
+
 ## 3.5.0（2026-10-15）
 
 需要 LiteJira 2.15.0 以上的後端（精簡模式、`mrLinks`、`bodyText` 由後端提供）。

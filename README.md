@@ -346,6 +346,9 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 | `text`（預設） | 本工具自動把 `&`、`<` 轉成實體、換行轉成 `<br>` | 一般文字、程式碼片段、網址（`List<int>`、`x<y`、`?a=1&copy=2` 都會原字保存） |
 | `html` | 原樣送出 | 需要粗體、清單、連結等格式；只收白名單 HTML，伺服器會消毒 |
 
+> ⚠️ **3.5.0 起預設改為 `text`**：以前不帶參數是原樣送出。原本直接送 HTML 標籤的呼叫者，
+> 升級後請改帶 `format=html`，否則標籤會變成看得見的文字。詳見 [CHANGELOG](CHANGELOG.md)。
+
 不支援 Markdown 語法（會原樣顯示）。讀留言時請用每筆的 `bodyText`（看得到的純文字）；
 `body` 是存下來的 HTML，不要把它當純文字再送一次。
 

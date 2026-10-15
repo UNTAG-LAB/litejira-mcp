@@ -146,7 +146,7 @@ test('GH-339：schema 擋掉壞參數 — 非 UUID / 負 offset / 超大 limit /
 test('GH-339：工具數由 26 變 27，傳輸描述子是內部細節、不外流到 tools/list', () => {
   const tools = listTools();
 
-  assert.equal(tools.length, 27);
+  assert.equal(tools.length, 35); // GH-392 再加待決事項與摘要 8 支
   tools.forEach((t) => {
     assert.ok(!('v1' in t), t.name + ' 不得把 v1 契約接線寫進 tools/list');
     assert.ok(!('dispatch' in t), t.name + ' 不得把 dispatch 寫進 tools/list');

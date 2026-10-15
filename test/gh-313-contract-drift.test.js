@@ -96,8 +96,8 @@ test('GH-313：傳輸層自己也守（繞過工具層直接呼叫 action 一樣
 
 test('GH-313：mine 是唯一的跨專案入口，且不套用 LTJ_PROJECT 預設', async function () {
   const def = searchDef();
-  assert.deepStrictEqual(def.inputSchema.properties.mine.enum, ['assignee', 'creator', 'watcher']);
-  assert.deepStrictEqual(MINE_VALUES.slice(), ['assignee', 'creator', 'watcher']);
+  assert.deepStrictEqual(def.inputSchema.properties.mine.enum, ['assignee', 'creator', 'watcher', 'decision']);
+  assert.deepStrictEqual(MINE_VALUES.slice(), ['assignee', 'creator', 'watcher', 'decision']);
 
   // 只帶 mine：即使 LTJ_PROJECT=LTJ 也不偷偷收斂成單一專案（那會回一份比要求更窄的清單）。
   const fetchImpl = okFetch({ items: [], nextCursor: null });
@@ -148,7 +148,7 @@ test('GH-313：啟動 instructions 講明搜尋的專案必填與跨專案限制
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, cfg(), neverFetch());
   const instructions = res.result.instructions;
   assert.match(instructions, /searchTickets 的 project 必填/);
-  assert.match(instructions, /mine=assignee\|creator\|watcher/);
+  assert.match(instructions, /mine=assignee\|creator\|watcher\|decision/);
 });
 
 // ── 靶 2：sort 值域 ─────────────────────────────────────────────────────

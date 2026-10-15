@@ -137,6 +137,31 @@ const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher']);
 // compact 只回對帳用的十四欄；一頁 100 筆的完整回應約 8.6 萬字，超過 AI 工具單次回傳上限。
 const LIST_VIEW_VALUES = Object.freeze(['full', 'compact']);
 
+// LiteJira GH-385：留言內文的格式。伺服器把留言一律當 HTML 解析再消毒（R-T18），
+// 所以純文字裡的 `<`（後接字母、/、!）會被當標籤吃掉後文，`&copy`、`&reg` 這類網址參數會變成符號。
+// 不叫模型自己跳脫（漏跳會遺失、跳兩次會出現 &amp;lt; 亂碼），由這裡統一做一次。
+const COMMENT_FORMAT_VALUES = Object.freeze(['text', 'html']);
+
+// 純文字 → 送出用的 HTML：& 先、< 後（順序反了會把剛產生的 &lt; 再跳一次），換行落成 <br>。
+// 必須是純函式：同一份輸入永遠得到同一個字串，冪等重送才不會撞 request_mismatch。
+// 對照表與 LiteJira `v2/server/test/unit/comment-plaintext-wire-gh385.test.ts` 逐字同一份。
+function plainTextToCommentHtml(text) {
+  return String(text)
+    .replace(/\r\n?/g, '\n')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/\n/g, '<br>');
+}
+
+function commentBodyForWire(body, format) {
+  if (body === undefined || body === null) return body;
+  if (format === undefined || format === 'text') return plainTextToCommentHtml(body);
+  if (format === 'html') return body;
+  throw new LiteJiraTransportError('invalid_argument',
+    'format 只接受 ' + COMMENT_FORMAT_VALUES.join(' | ') + '（text＝純文字自動跳脫，html＝原樣送出）',
+    { param: 'format', value: format, allowed: COMMENT_FORMAT_VALUES.slice() });
+}
+
 // ── 工單篩選維度登錄表（後端 P4.2d／P5.6 的完整查詢面）──────────────────────
 //
 // 事實源逐項對照：
@@ -1851,6 +1876,9 @@ module.exports = {
   LiteJiraTransportError,
   MINE_VALUES,
   LIST_VIEW_VALUES,
+  COMMENT_FORMAT_VALUES,
+  plainTextToCommentHtml,
+  commentBodyForWire,
   ORDER_VALUES,
   PENDING_CONTRACT_ACTIONS,
   REPLACED_ACTIONS,

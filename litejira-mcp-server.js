@@ -29,6 +29,8 @@ const {
   LiteJiraTransportError,
   MINE_VALUES,
   LIST_VIEW_VALUES,
+  COMMENT_FORMAT_VALUES,
+  commentBodyForWire,
   NORMAL_FIELDS,
   ORDER_VALUES,
   SORT_VALUES,
@@ -72,13 +74,20 @@ const ENUM_SORT = SORT_VALUES.slice();
 const ENUM_MINE = MINE_VALUES.slice();
 // LiteJira GH-385：留言的載體是消毒後的 HTML（後端 R-T18），不是 Markdown。
 // 舊說明寫「Markdown 支援」，助手因此送 `**粗體**` 期待渲染、讀回 `&gt;` 又以為資料壞了。
-// ⚠️ 伺服器把送來的字一律當 HTML 解析：純文字裡 `<` 緊接英文字母（`List<int>`、`x<y`）會被當成標籤消毒，
-// 後面的字直接遺失、讀回也救不回（LiteJira 寫入端既有缺口，另案）。說明據實要求呼叫端自己跳脫。
-const COMMENT_BODY_DESCRIPTION = '留言內容。伺服器一律當 HTML 解析並以消毒後的 HTML 儲存。' +
-  '純文字可直接送（換行保留；> 與 & 會存成 HTML 實體，網頁照原字顯示），' +
-  '但純文字裡的 < 一律先寫成 &lt;：< 緊接英文字母（例如 List<int>、x<y）會被當成標籤拿掉，後面的字會遺失且讀回救不回。' +
-  '要格式請送白名單內的 HTML（<p> <strong> <em> <code> <pre> <ul> <ol> <li> <a> 等）。' +
-  '不支援 Markdown 語法（會原樣顯示）。讀回時請用 bodyText 取純文字，不要把 body 當純文字再送一次（會變成 &amp;gt;）。';
+// ⚠️ 伺服器把送來的字一律當 HTML 解析：純文字裡 `<` 後接字母、/、! 會連同後文被當標籤吃掉，
+// 網址的 `&copy`、`&reg` 會變成符號（LiteJira GH-385 第二輪審查實測）。跳脫因此由 MCP 統一做
+//（`commentBodyForWire`，format 預設 text），說明不再叫模型自己跳脫：漏跳會遺失、跳兩次會出現 &amp;lt;。
+const COMMENT_BODY_DESCRIPTION = '留言內容。預設 format=text：照原字寫純文字即可，MCP 送出前會自動處理 & 與 <、' +
+  '換行轉成換行，讀回 bodyText 就是原字（含網址裡的 & 參數）。' +
+  '要粗體、清單、連結等格式時改用 format=html，送白名單內的 HTML（<p> <strong> <em> <code> <pre> <ul> <ol> <li> <a> 等），' +
+  'html 模式原樣送出。不支援 Markdown 語法（會原樣顯示）。' +
+  '讀回時請用 bodyText 取純文字，不要把 body（HTML）當純文字再送一次。';
+const P_COMMENT_FORMAT = {
+  type: 'string',
+  description: '留言內文格式。text（預設）＝純文字：MCP 送出前自動跳脫 & 與 <、換行轉 <br>，讀回 bodyText 與原字相同；' +
+    'html＝原樣送出白名單 HTML（伺服器會消毒）。不支援 markdown。',
+  enum: COMMENT_FORMAT_VALUES.slice()
+};
 // GH-257 第三包：releaseMethod 是 v1 的建單欄位，但值域由伺服器裁決 ——
 // 客戶端不寫死 enum（寫死會在後端新增值時把合法輸入擋在門外），只驗「非空字串」，受控值讀 litejira://meta。
 //
@@ -394,6 +403,7 @@ const TOOL_DEFS = [
     'replyFeedback', true, {
       ticketId: P_TICKET_REF,
       content: { type: 'string', description: COMMENT_BODY_DESCRIPTION + '會以 POST /tickets/{id}/comments 的 body 送出。' },
+      format: P_COMMENT_FORMAT,
       transition: {
         type: 'object',
         description: '可選的狀態流轉，會在留言「之前」執行。Shape: { action: string, reason?: string, fields?: object }。' +
@@ -746,6 +756,7 @@ const TOOL_DEFS = [
     'addComment', true, {
       ticketId: P_TICKET_REF,
       body: { type: 'string', description: COMMENT_BODY_DESCRIPTION },
+      format: P_COMMENT_FORMAT,
       mentions: {
         type: 'array',
         description: '要 @ 的成員 UUID 陣列（顯示名無效，請先讀 litejira://members 取 id）',
@@ -758,6 +769,8 @@ const TOOL_DEFS = [
       title: '新增留言'
     }, {
       v1: { action: 'addComment' },
+      // GH-385：format 是 MCP 本機參數，不送到伺服器；body 依 format 轉成送出用的字串
+      commentBodyParam: 'body',
       removedParams: {
         content: '留言內文的參數名是 body',
         transition: '留言不再夾帶狀態流轉；請先留言，再呼叫 litejira.transitionTicket',
@@ -1149,7 +1162,8 @@ async function callTool(name, args, config, fetchImpl) {
     throw mcpError_('WRITES_DISABLED', detail);
   }
 
-  const input = validateToolInput(def, args || {});
+  let input = validateToolInput(def, args || {});
+  if (def.commentBodyParam) input = commentInputForWire_(input, def.commentBodyParam);
   // Idempotency-Key 走 header，不是 body 欄位：在這裡抽出來，別讓它混進 params。
   const idempotencyKey = input.idempotencyKey;
 
@@ -1194,6 +1208,14 @@ async function callTool(name, args, config, fetchImpl) {
     content: [{ type: 'text', text: JSON.stringify(data) }],
     structuredContent: data
   };
+}
+
+// GH-385：把留言內文依 format 轉成送出字串，並拿掉 format（它只屬於 MCP，不是 v1 欄位）。
+function commentInputForWire_(input, param) {
+  const out = Object.assign({}, input);
+  out[param] = commentBodyForWire(input[param], input.format);
+  delete out.format;
+  return out;
 }
 
 // MCP 參數 → v1 params。MCP 端刻意沿用契約參數名，這裡只處理四件事：
@@ -1497,7 +1519,7 @@ async function replyFeedback_(input, cfg, fetchImpl) {
 
   const commentKey = stepKey_(baseKey, REPLY_STEP_COMMENT);
   const second = await replyStep_(REPLY_STEP_COMMENT, 'addComment',
-    { ticketId: input.ticketId, body: input.content }, cfg, fetchImpl, commentKey);
+    { ticketId: input.ticketId, body: commentBodyForWire(input.content, input.format) }, cfg, fetchImpl, commentKey);
   if (!second.ok) {
     const note = hasTransition
       ? '流轉已經生效，但未取得留言成功回應；留言是否生效請依下方結果判讀，先前流轉不會因此回滾。'

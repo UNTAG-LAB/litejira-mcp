@@ -28,6 +28,7 @@ const {
   LiteJiraApiError,
   LiteJiraTransportError,
   MINE_VALUES,
+  LIST_VIEW_VALUES,
   NORMAL_FIELDS,
   ORDER_VALUES,
   SORT_VALUES,
@@ -69,6 +70,11 @@ const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
 // GH-313：跨專案查詢唯一的入口（後端 MINE_DIMS）。
 const ENUM_MINE = MINE_VALUES.slice();
+// LiteJira GH-385：留言的載體是消毒後的 HTML（後端 R-T18），不是 Markdown。
+// 舊說明寫「Markdown 支援」，助手因此送 `**粗體**` 期待渲染、讀回 `&gt;` 又以為資料壞了。
+const COMMENT_BODY_DESCRIPTION = '留言內容。伺服器以消毒後的 HTML 儲存：純文字可直接送（換行保留，' +
+  '< > & 會存成 HTML 實體，網頁照原字顯示）；要格式請送白名單內的 HTML（<p> <strong> <em> <code> <pre> <ul> <ol> <li> <a> 等）。' +
+  '不支援 Markdown 語法（會原樣顯示）。讀回時請用 bodyText 取純文字，不要把 body 當純文字再送一次（會變成 &amp;gt;）。';
 // GH-257 第三包：releaseMethod 是 v1 的建單欄位，但值域由伺服器裁決 ——
 // 客戶端不寫死 enum（寫死會在後端新增值時把合法輸入擋在門外），只驗「非空字串」，受控值讀 litejira://meta。
 //
@@ -256,7 +262,7 @@ const SEARCH_FILTER_PARAMS = (function () {
 const TOOL_DEFS = [
   // 既有保留（7 個）
   tool('litejira.searchTickets',
-    'Search and filter tickets via API v1 (GET /tickets). PROJECT IS MANDATORY: pass project=<KEY>, or rely on the LTJ_PROJECT startup setting; with neither the server returns invalid_argument and this tool rejects the call locally. There is NO "omit project to search everything" mode. The ONLY cross-project query is mine=assignee|creator|watcher ("my tickets"), and when you go cross-project the server accepts NO other filter (no q, no type/status/priority/…, no member ids) — add project if you need to filter. Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. EVERY filter dimension accepts a string or an array of strings (positive conditions match any listed value; Not and NotContains exclude the entire listed set; different parameters are AND-ed) and EVERY dimension has a negated twin: append "Not" (statusNot, assigneeIdNot, typeNot, …) — a negated filter also matches tickets where that field is empty. The two text dimensions (title / description) additionally take Contains / NotContains for substring matching on that single column (q searches across columns instead). Also available: overdue=true|false (has a due date, past due, not final) and id=<uuid>[] to name up to ' + TICKET_ID_FILTER_MAX + ' specific tickets. All of these are general filters, so none of them may be combined with a bare cross-project mine query. Use litejira://ticket/{id} for one complete ticket.',
+    'Search and filter tickets via API v1 (GET /tickets). PROJECT IS MANDATORY: pass project=<KEY>, or rely on the LTJ_PROJECT startup setting; with neither the server returns invalid_argument and this tool rejects the call locally. There is NO "omit project to search everything" mode. The ONLY cross-project query is mine=assignee|creator|watcher ("my tickets"), and when you go cross-project the server accepts NO other filter (no q, no type/status/priority/…, no member ids) — add project if you need to filter. Returns { items, nextCursor } — each item carries a UUID "id" plus a human-readable public "key"; member fields are { id, name } objects (null when unset). Pass nextCursor back as "cursor" to page. Member/parent filters take UUIDs only (assigneeId / ownerId / creatorId / parentId) — read litejira://members for ids; display names are NOT accepted. EVERY filter dimension accepts a string or an array of strings (positive conditions match any listed value; Not and NotContains exclude the entire listed set; different parameters are AND-ed) and EVERY dimension has a negated twin: append "Not" (statusNot, assigneeIdNot, typeNot, …) — a negated filter also matches tickets where that field is empty. The two text dimensions (title / description) additionally take Contains / NotContains for substring matching on that single column (q searches across columns instead). Also available: overdue=true|false (has a due date, past due, not final) and id=<uuid>[] to name up to ' + TICKET_ID_FILTER_MAX + ' specific tickets. All of these are general filters, so none of them may be combined with a bare cross-project mine query. Each item also carries mrLinks: the merge/pull request URLs registered on that ticket (new-style MR links plus the legacy MR field, deduplicated; a registered link does NOT mean merged). RESPONSE SIZE: a full page of 100 items is large (~86k characters) — pass view=compact to get only id, key, type, title, status, stateGroup, isFinal, priority, assignee, targetVersion, parent, dueDate, updatedAt and mrLinks per item; view is a projection, not a filter, so it is allowed on a bare cross-project mine query and does not change paging. Omit view (or view=full) for the complete item. Use litejira://ticket/{id} for one complete ticket.',
     'searchTickets', false, Object.assign({
       project: { type: 'string', description: '專案 key（必填）。省略時採用啟動環境的 LTJ_PROJECT；' +
         '連正式站（litejira.untaglab.com）時就算憑證檔沒有 LTJ_PROJECT 這一行也有內建預設主專案 MAIN，' +
@@ -291,7 +297,14 @@ const TOOL_DEFS = [
       limit: P_LIMIT,
       cursor: P_CURSOR,
       sort: { type: 'string', description: 'Sort field（v1 契約值域，15 欄；預設 updatedAt）', enum: ENUM_SORT },
-      order: P_ORDER
+      order: P_ORDER,
+      view: {
+        type: 'string',
+        description: '回應投影：compact＝每筆只回對帳用的十四欄（含 mrLinks），一頁 100 筆時建議使用，' +
+          '避免回應過大被轉存成檔案；full 或不帶＝完整欄位。只影響回哪些欄，不影響篩選與分頁，' +
+          '跨專案（只帶 mine）時也可帶。',
+        enum: LIST_VIEW_VALUES.slice()
+      }
     }, SEARCH_FILTER_PARAMS), [], {
       readOnlyHint: true,
       openWorldHint: true,
@@ -304,12 +317,12 @@ const TOOL_DEFS = [
         owner: '改用 ownerId（UUID）；請先讀 litejira://members 取 id',
         creator: '改用 creatorId（UUID）；請先讀 litejira://members 取 id',
         version: '版本條件分成 targetVersion（目標版本）與 foundVersion（發現版本）兩個獨立參數，請明講是哪一個',
-        responseMode: 'v1 的 GET /tickets 沒有 responseMode；清單一律回契約定義的欄位集合。' +
+        responseMode: 'v1 的 GET /tickets 沒有 responseMode；要縮小回應請改用 view=compact。' +
           '只要數量請自行讀回應長度，單張完整內容請讀 litejira://ticket/{id}'
       }
     }),
   tool('litejira.listComments',
-    'List comments for a ticket via API v1 (GET /tickets/{ticket}/comments). Paginated with limit / cursor / order; returns { items, nextCursor } where each item carries a UUID id and an author { id, name }. The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key.',
+    'List comments for a ticket via API v1 (GET /tickets/{ticket}/comments). Paginated with limit / cursor / order; returns { items, nextCursor } where each item carries a UUID id and an author { id, name }. Each item has "body" = the stored, sanitized HTML (so a plain-text ">" reads back as "&gt;") and "bodyText" = the visible plain text (tags removed, entities decoded once, paragraph/line breaks as \n) — read bodyText when you need the words, and never re-post body as plain text. The ticket argument accepts a UUID, a public key (BUG-481) or a numeric key.',
     'listComments', false, {
       ticketId: P_TICKET_REF,
       limit: P_LIMIT,
@@ -323,7 +336,7 @@ const TOOL_DEFS = [
       v1: { action: 'listComments', ticketParam: 'ticket' }
     }),
   tool('litejira.getActivityLog',
-    'Get the activity timeline for a ticket via API v1 (GET /tickets/{ticket}/activity). Paginated with limit / cursor / order. Filter with kind=user (human actions incl. comments) or kind=system (status changes, reassignments); OMIT kind to get everything. Returns { items, nextCursor }.',
+    'Get the activity timeline for a ticket via API v1 (GET /tickets/{ticket}/activity). Paginated with limit / cursor / order. Filter with kind=user (human actions incl. comments) or kind=system (status changes, reassignments); OMIT kind to get everything. Returns { items, nextCursor }; like listComments, each item has "body" (stored sanitized HTML) and "bodyText" (visible plain text).',
     'getActivityLog', false, {
       ticketId: P_TICKET_REF,
       limit: P_LIMIT,
@@ -376,7 +389,7 @@ const TOOL_DEFS = [
     'Post a comment on a ticket, optionally preceded by a status transition. NOT ATOMIC and never was: this is a CLIENT-SIDE COMPOSITE of two v1 calls in a fixed order — (1) POST /transitions if "transition" is given, then (2) POST /comments. There is no rollback. If the transition fails the comment is NOT sent (you get the transition error). If the comment fails AFTER a successful transition you get an explicit partial-success error naming the completed step. Each step uses its own stable idempotency key derived from your idempotencyKey. Dedupe is NOT unlimited: it holds only inside the server\'s 24h idempotency retention window AND only for a byte-identical retry, so a same-key retry of the whole call re-uses the already-applied step only within that window — after it expires, or with a new key, the step really runs a second time. On an unknown outcome (5xx / network / idempotency_key_reused with details.reason=in_progress) do NOT auto-retry and do NOT mint a new key: read the current ticket state first. On details.reason=request_mismatch the payload you just sent was rejected, but the outcome of the EARLIER request under that key is not proven — inspect state and resume only the step that is genuinely missing. The transition takes an ACTION LABEL (call litejira.getTransitions first) — v1 does NOT accept a target status name. For comment-only, prefer litejira.addComment; expectedUpdatedAt is accepted ONLY together with a transition (the comment endpoint has no optimistic lock). FIELDS FIRST: do NOT write information that has its own field into comment text — MR/PR link → litejira.addTicketLink (kind=mr); validation method, verifiable versions, fix method, repro steps → litejira.updateField; dependencies between tickets → litejira.addTicketRelation. Comments are for discussion, decisions and open questions.',
     'replyFeedback', true, {
       ticketId: P_TICKET_REF,
-      content: { type: 'string', description: '留言內容（Markdown 支援）；會以 POST /tickets/{id}/comments 的 body 送出。' },
+      content: { type: 'string', description: COMMENT_BODY_DESCRIPTION + '會以 POST /tickets/{id}/comments 的 body 送出。' },
       transition: {
         type: 'object',
         description: '可選的狀態流轉，會在留言「之前」執行。Shape: { action: string, reason?: string, fields?: object }。' +
@@ -728,7 +741,7 @@ const TOOL_DEFS = [
     'Post a comment on a ticket via API v1 (POST /tickets/{ticketId}/comments). Body is { body, mentions? } — the comment text parameter is "body", and mentions is an array of member UUIDs (read litejira://members). This endpoint does NOT transition status and does NOT take an optimistic lock: to change status, call litejira.transitionTicket separately. FIELDS FIRST: do NOT write information that has its own field into comment text — MR/PR link → litejira.addTicketLink (kind=mr); validation method, verifiable versions, fix method, repro steps → litejira.updateField; dependencies between tickets → litejira.addTicketRelation. Comments are for discussion, decisions and open questions.',
     'addComment', true, {
       ticketId: P_TICKET_REF,
-      body: { type: 'string', description: '留言內容（Markdown 支援）' },
+      body: { type: 'string', description: COMMENT_BODY_DESCRIPTION },
       mentions: {
         type: 'array',
         description: '要 @ 的成員 UUID 陣列（顯示名無效，請先讀 litejira://members 取 id）',

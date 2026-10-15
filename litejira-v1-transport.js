@@ -133,6 +133,9 @@ const SORT_VALUES = Object.freeze([
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 // GH-313：唯一天然跨專案的篩選維度（後端 read-queries.ts 的 `MINE_DIMS`，R-A15 三）。
 const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher']);
+// LiteJira GH-386：清單的回應投影（後端 `ticket-list-view.ts` 的 `TICKET_LIST_VIEWS`）。
+// compact 只回對帳用的十四欄；一頁 100 筆的完整回應約 8.6 萬字，超過 AI 工具單次回傳上限。
+const LIST_VIEW_VALUES = Object.freeze(['full', 'compact']);
 
 // ── 工單篩選維度登錄表（後端 P4.2d／P5.6 的完整查詢面）──────────────────────
 //
@@ -225,10 +228,12 @@ const ACTION_MAP = Object.freeze({
       // 範圍（project / mine）＋ 排序分頁 ＋ 完整篩選面（32 個運算子欄 ＋ q ＋ overdue ＋ id）。
       // 篩選那一段由維度登錄表展開，不逐欄手抄 —— 見 `TICKET_FILTER_FIELDS` 檔頭。
       allow: Object.freeze(
-        ['project', 'mine', 'limit', 'cursor', 'sort', 'order'].concat(TICKET_QUERY_FIELDS)),
+        ['project', 'mine', 'limit', 'cursor', 'sort', 'order', 'view'].concat(TICKET_QUERY_FIELDS)),
       uuid: TICKET_FILTER_UUID_FIELDS,
       multi: TICKET_FILTER_MULTI_FIELDS,
-      enums: Object.freeze({ sort: SORT_VALUES, order: ORDER_VALUES, mine: MINE_VALUES }),
+      enums: Object.freeze({
+        sort: SORT_VALUES, order: ORDER_VALUES, mine: MINE_VALUES, view: LIST_VIEW_VALUES
+      }),
       int: Object.freeze(['limit']),
       bool: Object.freeze(['overdue']),
       // `id` 的上限與後端同一個數字：超過就是本機擋下，不送出一發必定 422 的查詢。
@@ -238,7 +243,8 @@ const ACTION_MAP = Object.freeze({
       scope: Object.freeze({
         key: 'project',
         crossProject: 'mine',
-        crossProjectAllow: Object.freeze(['mine', 'limit', 'cursor', 'sort', 'order'])
+        // view 是回應投影、不改變「框到哪些單」——與排序分頁同一類，跨專案照樣可帶（GH-386）
+        crossProjectAllow: Object.freeze(['mine', 'limit', 'cursor', 'sort', 'order', 'view'])
       })
     }),
     rejected: Object.freeze({
@@ -1844,6 +1850,7 @@ module.exports = {
   LiteJiraApiError,
   LiteJiraTransportError,
   MINE_VALUES,
+  LIST_VIEW_VALUES,
   ORDER_VALUES,
   PENDING_CONTRACT_ACTIONS,
   REPLACED_ACTIONS,

@@ -133,6 +133,34 @@ const SORT_VALUES = Object.freeze([
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 // GH-313：唯一天然跨專案的篩選維度（後端 read-queries.ts 的 `MINE_DIMS`，R-A15 三）。
 const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher']);
+// LiteJira GH-386：清單的回應投影（後端 `ticket-list-view.ts` 的 `TICKET_LIST_VIEWS`）。
+// compact 只回對帳用的十四欄；一頁 100 筆的完整回應約 8.6 萬字，超過 AI 工具單次回傳上限。
+const LIST_VIEW_VALUES = Object.freeze(['full', 'compact']);
+
+// LiteJira GH-385：留言內文的格式。伺服器把留言一律當 HTML 解析再消毒（R-T18），
+// 所以純文字裡的 `<`（後接字母、/、!）會被當標籤吃掉後文，`&copy`、`&reg` 這類網址參數會變成符號。
+// 不叫模型自己跳脫（漏跳會遺失、跳兩次會出現 &amp;lt; 亂碼），由這裡統一做一次。
+const COMMENT_FORMAT_VALUES = Object.freeze(['text', 'html']);
+
+// 純文字 → 送出用的 HTML：& 先、< 後（順序反了會把剛產生的 &lt; 再跳一次），換行落成 <br>。
+// 必須是純函式：同一份輸入永遠得到同一個字串，冪等重送才不會撞 request_mismatch。
+// 對照表與 LiteJira `v2/server/test/unit/comment-plaintext-wire-gh385.test.ts` 逐字同一份。
+function plainTextToCommentHtml(text) {
+  return String(text)
+    .replace(/\r\n?/g, '\n')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/\n/g, '<br>');
+}
+
+function commentBodyForWire(body, format) {
+  if (body === undefined || body === null) return body;
+  if (format === undefined || format === 'text') return plainTextToCommentHtml(body);
+  if (format === 'html') return body;
+  throw new LiteJiraTransportError('invalid_argument',
+    'format 只接受 ' + COMMENT_FORMAT_VALUES.join(' | ') + '（text＝純文字自動跳脫，html＝原樣送出）',
+    { param: 'format', value: format, allowed: COMMENT_FORMAT_VALUES.slice() });
+}
 
 // ── 工單篩選維度登錄表（後端 P4.2d／P5.6 的完整查詢面）──────────────────────
 //
@@ -225,10 +253,12 @@ const ACTION_MAP = Object.freeze({
       // 範圍（project / mine）＋ 排序分頁 ＋ 完整篩選面（32 個運算子欄 ＋ q ＋ overdue ＋ id）。
       // 篩選那一段由維度登錄表展開，不逐欄手抄 —— 見 `TICKET_FILTER_FIELDS` 檔頭。
       allow: Object.freeze(
-        ['project', 'mine', 'limit', 'cursor', 'sort', 'order'].concat(TICKET_QUERY_FIELDS)),
+        ['project', 'mine', 'limit', 'cursor', 'sort', 'order', 'view'].concat(TICKET_QUERY_FIELDS)),
       uuid: TICKET_FILTER_UUID_FIELDS,
       multi: TICKET_FILTER_MULTI_FIELDS,
-      enums: Object.freeze({ sort: SORT_VALUES, order: ORDER_VALUES, mine: MINE_VALUES }),
+      enums: Object.freeze({
+        sort: SORT_VALUES, order: ORDER_VALUES, mine: MINE_VALUES, view: LIST_VIEW_VALUES
+      }),
       int: Object.freeze(['limit']),
       bool: Object.freeze(['overdue']),
       // `id` 的上限與後端同一個數字：超過就是本機擋下，不送出一發必定 422 的查詢。
@@ -238,7 +268,8 @@ const ACTION_MAP = Object.freeze({
       scope: Object.freeze({
         key: 'project',
         crossProject: 'mine',
-        crossProjectAllow: Object.freeze(['mine', 'limit', 'cursor', 'sort', 'order'])
+        // view 是回應投影、不改變「框到哪些單」——與排序分頁同一類，跨專案照樣可帶（GH-386）
+        crossProjectAllow: Object.freeze(['mine', 'limit', 'cursor', 'sort', 'order', 'view'])
       })
     }),
     rejected: Object.freeze({
@@ -1844,6 +1875,10 @@ module.exports = {
   LiteJiraApiError,
   LiteJiraTransportError,
   MINE_VALUES,
+  LIST_VIEW_VALUES,
+  COMMENT_FORMAT_VALUES,
+  plainTextToCommentHtml,
+  commentBodyForWire,
   ORDER_VALUES,
   PENDING_CONTRACT_ACTIONS,
   REPLACED_ACTIONS,

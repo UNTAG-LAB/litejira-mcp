@@ -150,7 +150,7 @@ litejira-mcp setup --client auto --json    # 既有憑證會自動沿用並重�
 LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 ```
 
-它會用真正的 stdio 通道跑一遍握手、27 個工具的清單、8 個資源、4 個提示與 4 個讀取工具，
+它會用真正的 stdio 通道跑一遍握手、35 個工具的清單、8 個資源、4 個提示與 4 個讀取工具，
 逐項印出 ✔ / ✖，全過回 exit 0。腳本本身不含也不寫入任何憑證，只從環境變數讀，而且不把權杖印出來。
 （自訂站台請另外給 `LTJ_API_URL` 與 `LTJ_PROJECT`。）
 
@@ -202,7 +202,7 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 
 ## 能做什麼
 
-> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，27 個工具都能用。
+> ✅ **本版連的是 LiteJira 2.0 的對外 REST API v1**：讀取與寫入全部切換完成，35 個工具都能用。
 > 三件要知道的事：
 > 1. **批量操作是「部分成功」的**：一次處理 N 張，伺服器會回「成功哪幾張、失敗哪幾張」，
 >    整體回應成功不代表每張都改到了。AI 應該把失敗清單如實講給你聽。
@@ -240,6 +240,25 @@ LTJ_API_TOKEN=<你的權杖> node scripts/smoke-stdio-readonly.cjs
 | 「留言說明並同時改狀態，一次完成」 | 先改狀態、再留言（兩步，非原子） | ✅（中途失敗會明講哪一步沒成，不會自動還原） |
 | 「把 BUG-530 的到期日改成下週五」 | 改單一欄位 | ✅（改狀態除外：那要說動作名稱，走一般流轉） |
 | 「這 20 張一起送測 / 一起轉派 / 一起改版本」 | 批量操作（一次最多 100 張） | ✅（會回成功與失敗兩份清單） |
+
+### 待決事項與目前摘要（LiteJira GH-392）
+
+要人決定的問題不要寫在留言裡，開成**待決事項**：一題問一個人，可給 0-6 個選項與截止日，
+狀態分未答／已答／撤回，被問的人在網頁的「等待處理」看得到、回答後開題人會收到通知。
+
+| 工具 | 用途 |
+|---|---|
+| `openDecisions` | 一次開 1-20 題（全成或全敗）；從某則留言開出來時帶 `sourceCommentId` |
+| `listDecisions` | 一張單的全部題目（可篩 `status`） |
+| `listDecisionsAskedToMe` | 跨專案：問我、還沒答的題目 |
+| `answerDecision` | 回答（選項及／或文字）；只有被問的人或有全域編輯權的人（代答） |
+| `withdrawDecision` | 撤回不需要的題目（原因必填） |
+| `updateDecision` | 編輯未答題目（改問別人會通知新被問的人） |
+| `getSummary` | 讀**目前摘要**（現況、卡在誰、下一步、外部依賴），`history=true` 連同舊版本 |
+| `setSummary` | 整份覆寫摘要成新版本；帶 `expectedVersion`（尚無摘要為 0） |
+
+接手一張單時先讀 `getSummary` 與 `listDecisions`，不必從頭讀留言。工單之間的依賴仍用
+`addTicketRelation(kind=blocked_by)`，不放在摘要裡。`searchTickets` 的 `mine=decision` 可跨專案篩出問我的單。
 
 ### 附件怎麼拿、怎麼放
 

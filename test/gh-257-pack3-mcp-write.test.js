@@ -402,7 +402,7 @@ test('addComment 送 POST /tickets/{ticketId}/comments，body 是 { body, mentio
   const call = fetchImpl.calls[0];
   assert.strictEqual(call.init.method, 'POST');
   assert.strictEqual(call.url, V1 + '/tickets/BUG-481/comments');
-  assert.deepStrictEqual(JSON.parse(call.init.body), { body: '已修正', mentions: [UUID2] });
+  assert.deepStrictEqual(JSON.parse(call.init.body), { body: '已修正', mentions: [UUID2], format: 'markdown' });
 });
 
 test('addComment：舊的 content / transition / expectedUpdatedAt 被拒絕並指路，零請求', async function () {

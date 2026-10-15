@@ -66,6 +66,15 @@ const TICKET_REF_PATTERN = /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 // 批次端點的上限：一發最多 100 張（契約值，不是客戶端自訂的保守值）。
 const BATCH_MAX_TICKETS = 100;
 
+// GH-339：讀文字附件的位元組視窗界線。與後端 v2/server/src/attachments/text-window.ts
+// 逐字同值（MIN_TEXT_WINDOW_BYTES 4 / MAX 256 KiB / DEFAULT 64 KiB / TEXT_READ_LIMIT 2 MiB）。
+// 在這裡先擋是為了省一次往返，**不是**另一份判定 —— 真正的界線仍在伺服器，
+// 兩邊不同步時以伺服器的 422 為最終答案。
+const TEXT_WINDOW_MIN_BYTES = 4;
+const TEXT_WINDOW_MAX_BYTES = 256 * 1024;
+const TEXT_WINDOW_DEFAULT_BYTES = 64 * 1024;
+const TEXT_READ_LIMIT_BYTES = 2 * 1024 * 1024;
+
 // ── 第四包：可直接 PATCH 的「一般欄位」全集 ──
 // 這些欄位走 PATCH /tickets/{ticket}，body 是平攤的 { [欄位]: 值 }。
 // 不在這裡的四類各有專屬端點（狀態 / 父子 / 處理人 / 版本），硬塞進 PATCH 只會被伺服器丟掉。
@@ -189,6 +198,8 @@ const LIST_QUERY_ALLOW = Object.freeze(['limit', 'cursor', 'order']);
 //   query.multi   可重複出現的多值參數（陣列 → 重複 query，不用逗號串接）
 //   query.enums   固定值域
 //   query.int     必須是正整數
+//   query.uint    必須是非負整數（0 是合法值 —— 例：讀文字附件的 offset=0 ＝「從頭讀」，
+//                 與「沒帶 offset」在契約上同義，但呼叫端明寫 0 不該被本機當成壞值擋掉）
 //   query.bool    必須是布林（序列化為 true / false）
 //   query.maxValues 多值參數的值數上限（超過一律本機擋下，不截斷成前 N 個）
 //   query.required 契約上必填的 query（缺了本機就擋，不送出半套查詢）
@@ -292,6 +303,34 @@ const ACTION_MAP = Object.freeze({
       order: '附件不分頁，且排序不承諾是「使用者的順序」；沒有 order 參數'
     }),
     contractRef: 'GET /api/v1/tickets/{ticket}/attachments'
+  }),
+
+  // GH-339：讀文字附件的原文（md / txt / csv）。與取檔那一支（/content）同一個命令層物件、
+  // 同一段權限四查 —— 這條路徑省掉的只是「先下載整份再自行解碼」，不是任何一道判定。
+  // 回應是 JSON 信封（{ data: AttachmentTextDelivery }），不是位元組串流。
+  //
+  // 視窗是**位元組**視窗，不是集合分頁：offset / limit 的單位是 byte，
+  // 所以 offset 必須收 0（＝從檔首），用 query.uint 而不是 query.int。
+  // 界線（MIN 4 / MAX 256 KiB / 預設 64 KiB / 每份上限 2 MiB）的事實源在後端
+  // v2/server/src/attachments/text-window.ts；本層只做形狀檢查，不複製那份判定。
+  readAttachmentText: Object.freeze({
+    method: 'GET',
+    pathTemplate: '/attachments/{attachmentId}/text',
+    pathParams: Object.freeze(['attachmentId']),
+    pathUuid: Object.freeze(['attachmentId']),
+    query: Object.freeze({
+      allow: Object.freeze(['offset', 'limit']),
+      uint: Object.freeze(['offset', 'limit'])
+    }),
+    rejected: Object.freeze({
+      cursor: '這條切的是同一份檔案的位元組視窗，不是集合分頁：請用 offset（位元組）' +
+        '並沿用上一次回應的 nextByteOffset，沒有 cursor',
+      encoding: '只支援 UTF-8；伺服器不做轉碼也不做有損解碼。舊編碼（Big5 等）請改用 ' +
+        'GET /api/v1/attachments/{attachmentId}/content 下載原檔後自行處理',
+      ticketId: '這條以附件 id（UUID）定位，不需要工單參照；附件 id 請讀 ' +
+        'GET /api/v1/tickets/{ticket}/attachments（litejira.getAttachments）'
+    }),
+    contractRef: 'GET /api/v1/attachments/{attachmentId}/text'
   }),
 
   // 可用流轉動作。無任何 query；回應 data 是物件（含 actions 等欄位），不是陣列。
@@ -920,6 +959,7 @@ function buildQuery(route, params) {
   const uuidKeys = spec.uuid || [];
   const multiKeys = spec.multi || [];
   const intKeys = spec.int || [];
+  const uintKeys = spec.uint || [];
   const boolKeys = spec.bool || [];
   const maxValues = spec.maxValues || {};
   const enums = spec.enums || {};
@@ -957,6 +997,9 @@ function buildQuery(route, params) {
       }
       if (intKeys.indexOf(key) !== -1 && !isPositiveInt_(one)) {
         throw invalidArg_('參數「' + key + '」必須是正整數', { param: key });
+      }
+      if (uintKeys.indexOf(key) !== -1 && !isNonNegativeInt_(one)) {
+        throw invalidArg_('參數「' + key + '」必須是 0 以上的整數', { param: key });
       }
       if (boolKeys.indexOf(key) !== -1 && typeof one !== 'boolean') {
         throw invalidArg_('參數「' + key + '」必須是布林值（true / false）', { param: key });
@@ -1011,6 +1054,13 @@ function buildQuery(route, params) {
 function isPositiveInt_(value) {
   const n = typeof value === 'number' ? value : Number(value);
   return Number.isInteger(n) && n > 0;
+}
+
+// 非負整數（0 合法）。與 isPositiveInt_ 刻意分開：分頁的 limit 收到 0 是壞值，
+// 位元組視窗的 offset 收到 0 是「從檔首開始」—— 同一個判定套兩邊會誤擋後者。
+function isNonNegativeInt_(value) {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(n) && n >= 0;
 }
 
 function buildPath(route, params) {
@@ -1243,6 +1293,9 @@ const ATTACHMENT_UPLOAD_PATH = '/tickets/{ticket}/attachments/upload';
 const WEB_ATTACHMENT_CONTENT_PATH = '/api/web/attachments/{attachmentId}/content';
 const ATTACHMENT_DOWNLOAD_CONTRACT = 'GET /api/v1/attachments/{attachmentId}/content';
 const ATTACHMENT_UPLOAD_CONTRACT = 'POST /api/v1/tickets/{ticket}/attachments/upload?name=ENCODED_FILENAME';
+// GH-339：讀文字那一支。與上面的下載路由同一個附件、同一段權限判定，差別只在回應形狀
+//（JSON 的 { data } 信封 vs. 位元組串流），所以它在 ACTION_MAP 裡而這裡只放契約字串。
+const ATTACHMENT_TEXT_CONTRACT = 'GET /api/v1/attachments/{attachmentId}/text';
 // 預設 25 MiB、可調上限 100 MiB。上界是守門不是禮貌：沒有上界時一個筆誤的路徑
 //（例如指到一個 40 GB 的映像檔）會把整條連線與記憶體拖垮。
 const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -1770,6 +1823,7 @@ module.exports = {
   ACTIVITY_KIND_VALUES,
   API_BASE_PATH,
   ATTACHMENT_DOWNLOAD_CONTRACT,
+  ATTACHMENT_TEXT_CONTRACT,
   ATTACHMENT_UPLOAD_CONTRACT,
   DEFAULT_MAX_UPLOAD_BYTES,
   UPLOAD_BYTES_CEILING,
@@ -1795,6 +1849,10 @@ module.exports = {
   REPLACED_ACTIONS,
   SORT_VALUES,
   STATS_SCOPE_VALUES,
+  TEXT_READ_LIMIT_BYTES,
+  TEXT_WINDOW_DEFAULT_BYTES,
+  TEXT_WINDOW_MAX_BYTES,
+  TEXT_WINDOW_MIN_BYTES,
   TEXT_FILTER_DIMS,
   TEXT_FILTER_OPS,
   TICKET_FILTER_FIELDS,

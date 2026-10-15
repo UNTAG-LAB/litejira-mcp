@@ -38,15 +38,16 @@ const PACK4_TOOLS = [
   ['litejira.batchSetField', { tickets: ['BUG-481'], field: 'priority', value: 'P1-高' }]
 ];
 
-// ── tools/list：27 個工具全部公告，沒有任何 pending ──
+// ── tools/list：35 個工具全部公告，沒有任何 pending ──
 // （GH-317 起多了 getAttachments / uploadAttachment 兩支附件工具；GH-372 起多了工單關聯三支；GH-339 再多一支唯讀的 readAttachmentText。）
 
-test('tools/list 回全部 27 個工具，第四包的 5 個都在', async function () {
+test('tools/list 回全部 35 個工具，第四包的 5 個都在', async function () {
   const names = listTools().map(function (t) { return t.name; }).sort();
   assert.deepStrictEqual(names, [
     'litejira.addComment',
     'litejira.addTicketLink',
     'litejira.addTicketRelation',
+    'litejira.answerDecision',
     'litejira.attachLink',
     'litejira.batchReassign',
     'litejira.batchSetField',
@@ -55,11 +56,15 @@ test('tools/list 回全部 27 個工具，第四包的 5 個都在', async funct
     'litejira.createTicket',
     'litejira.getActivityLog',
     'litejira.getAttachments',
+    'litejira.getSummary',
     'litejira.getTransitions',
     'litejira.linkTickets',
     'litejira.listComments',
+    'litejira.listDecisions',
+    'litejira.listDecisionsAskedToMe',
     'litejira.listTicketLinks',
     'litejira.listTicketRelations',
+    'litejira.openDecisions',
     'litejira.readAttachmentText',
     'litejira.reassignTicket',
     'litejira.removeAttachment',
@@ -67,12 +72,15 @@ test('tools/list 回全部 27 個工具，第四包的 5 個都在', async funct
     'litejira.removeTicketRelation',
     'litejira.replyFeedback',
     'litejira.searchTickets',
+    'litejira.setSummary',
     'litejira.toggleWatch',
     'litejira.transitionTicket',
+    'litejira.updateDecision',
     'litejira.updateField',
-    'litejira.uploadAttachment'
+    'litejira.uploadAttachment',
+    'litejira.withdrawDecision'
   ]);
-  assert.strictEqual(names.length, 27);
+  assert.strictEqual(names.length, 35);
 });
 
 test('第四包的 5 個工具都要求 idempotencyKey，且不再宣稱未接線', async function () {

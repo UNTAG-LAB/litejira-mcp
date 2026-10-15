@@ -316,9 +316,9 @@ test('403 底下三種互斥語意各自保留，不被狀態碼壓成同一種'
 
 // GH-257 第四包：最後 5 個工具接線後，tools/list 是完整的 18 個（4 讀 + 14 寫）。
 // 「哪些工具可用」的權威清單改由第四包的測試逐一鎖定；這裡只鎖「不再有 pending」。
-test('tools/list 公告全部 27 個工具，沒有任何 pending 工具被藏起來', async function () {
+test('tools/list 公告全部 35 個工具，沒有任何 pending 工具被藏起來', async function () {
   const names = listTools().map((t) => t.name);
-  assert.strictEqual(names.length, 27);
+  assert.strictEqual(names.length, 35);
   [
     'litejira.searchTickets', 'litejira.listComments', 'litejira.getActivityLog', 'litejira.getTransitions',
     'litejira.getAttachments', 'litejira.readAttachmentText', 'litejira.uploadAttachment',

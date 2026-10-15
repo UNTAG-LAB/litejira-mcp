@@ -132,7 +132,7 @@ const SORT_VALUES = Object.freeze([
 ]);
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 // GH-313：唯一天然跨專案的篩選維度（後端 read-queries.ts 的 `MINE_DIMS`，R-A15 三）。
-const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher']);
+const MINE_VALUES = Object.freeze(['assignee', 'creator', 'watcher', 'decision']);
 // LiteJira GH-386：清單的回應投影（後端 `ticket-list-view.ts` 的 `TICKET_LIST_VIEWS`）。
 // compact 只回對帳用的十四欄；一頁 100 筆的完整回應約 8.6 萬字，超過 AI 工具單次回傳上限。
 const LIST_VIEW_VALUES = Object.freeze(['full', 'compact']);
@@ -494,6 +494,84 @@ const ACTION_MAP = Object.freeze({
     pathParams: Object.freeze(['ticketId', 'linkId']), pathUuid: Object.freeze(['linkId']),
     query: Object.freeze({ allow: Object.freeze([]) }),
     contractRef: 'DELETE /api/v1/tickets/{ticketId}/links/{linkId}'
+  }),
+  // GH-392：待決事項與目前摘要。回答／撤回／編輯帶 expectedUpdatedAt（原樣 ISO 字串）；
+  // 摘要整份覆寫帶 expectedVersion（目前版本號，尚無摘要為 0）。值域與上限由後端裁決，本層只擋形狀。
+  listDecisions: Object.freeze({
+    method: 'GET', pathTemplate: '/tickets/{ticketId}/decisions',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze(['status']),
+      enums: Object.freeze({ status: Object.freeze(['open', 'answered', 'withdrawn']) }) }),
+    contractRef: 'GET /api/v1/tickets/{ticketId}/decisions'
+  }),
+  listDecisionsAskedToMe: Object.freeze({
+    method: 'GET', pathTemplate: '/decisions/asked-to-me',
+    pathParams: Object.freeze([]),
+    query: Object.freeze({ allow: Object.freeze(['limit']), int: Object.freeze(['limit']) }),
+    contractRef: 'GET /api/v1/decisions/asked-to-me'
+  }),
+  openDecisions: Object.freeze({
+    method: 'POST', pathTemplate: '/tickets/{ticketId}/decisions',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['decisions', 'sourceCommentId']), required: Object.freeze(['decisions']),
+      uuid: Object.freeze(['sourceCommentId']), nullable: Object.freeze(['sourceCommentId'])
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/decisions'
+  }),
+  answerDecision: Object.freeze({
+    method: 'POST', pathTemplate: '/tickets/{ticketId}/decisions/{decisionId}/answer',
+    pathParams: Object.freeze(['ticketId', 'decisionId']), pathUuid: Object.freeze(['decisionId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['option', 'text', 'expectedUpdatedAt']), required: Object.freeze(['expectedUpdatedAt']),
+      nullable: Object.freeze(['option', 'text']), string: Object.freeze(['text']),
+      isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/decisions/{decisionId}/answer'
+  }),
+  withdrawDecision: Object.freeze({
+    method: 'POST', pathTemplate: '/tickets/{ticketId}/decisions/{decisionId}/withdraw',
+    pathParams: Object.freeze(['ticketId', 'decisionId']), pathUuid: Object.freeze(['decisionId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['reason', 'expectedUpdatedAt']), required: Object.freeze(['reason', 'expectedUpdatedAt']),
+      string: Object.freeze(['reason']), isoString: Object.freeze(['expectedUpdatedAt'])
+    }),
+    contractRef: 'POST /api/v1/tickets/{ticketId}/decisions/{decisionId}/withdraw'
+  }),
+  updateDecision: Object.freeze({
+    method: 'PATCH', pathTemplate: '/tickets/{ticketId}/decisions/{decisionId}',
+    pathParams: Object.freeze(['ticketId', 'decisionId']), pathUuid: Object.freeze(['decisionId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['question', 'context', 'askedToId', 'options', 'dueOn', 'expectedUpdatedAt']),
+      required: Object.freeze(['expectedUpdatedAt']),
+      nullable: Object.freeze(['context', 'dueOn']), string: Object.freeze(['question']),
+      uuid: Object.freeze(['askedToId']), stringArray: Object.freeze(['options']), date: Object.freeze(['dueOn']),
+      isoString: Object.freeze(['expectedUpdatedAt']), allowEmptyString: Object.freeze(['context'])
+    }),
+    contractRef: 'PATCH /api/v1/tickets/{ticketId}/decisions/{decisionId}'
+  }),
+  getSummary: Object.freeze({
+    method: 'GET', pathTemplate: '/tickets/{ticketId}/summary',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze(['history']), bool: Object.freeze(['history']) }),
+    contractRef: 'GET /api/v1/tickets/{ticketId}/summary'
+  }),
+  setSummary: Object.freeze({
+    method: 'PUT', pathTemplate: '/tickets/{ticketId}/summary',
+    pathParams: Object.freeze(['ticketId']),
+    query: Object.freeze({ allow: Object.freeze([]) }),
+    body: Object.freeze({
+      allow: Object.freeze(['statusText', 'blockedOnIds', 'blockedNote', 'nextStep', 'externalDeps', 'expectedVersion']),
+      required: Object.freeze(['blockedOnIds', 'externalDeps', 'expectedVersion']),
+      string: Object.freeze(['statusText', 'blockedNote', 'nextStep']),
+      allowEmptyString: Object.freeze(['statusText', 'blockedNote', 'nextStep']),
+      uuidArray: Object.freeze(['blockedOnIds']), stringArray: Object.freeze(['externalDeps'])
+    }),
+    contractRef: 'PUT /api/v1/tickets/{ticketId}/summary'
   }),
   // GH-372：工單關聯三支。關聯沒有自己的 id，以（本單、語意、對象單）三欄定位，所以解除把三者都放在路徑上。
   listTicketRelations: Object.freeze({

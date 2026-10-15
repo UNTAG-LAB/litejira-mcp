@@ -472,6 +472,90 @@ const TOOL_DEFS = [
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'kind', 'targetId', 'idempotencyKey'], { title: '移除工單關聯', destructiveHint: true, idempotentHint: true },
     { v1: { action: 'removeTicketRelation' } }),
+  // GH-392：待決事項（要人決定的問題）與目前摘要。題目不是留言：有問誰、選項、截止日與未答／已答／撤回狀態。
+  tool('litejira.listDecisions',
+    'List the pending-decision questions of one ticket via GET /tickets/{ticketId}/decisions (optional status=open|answered|withdrawn). Returns {items:[{id,seq,question,context,askedTo,options:[{label}],dueOn,status,answer,withdrawal,sourceCommentId,createdBy,createdAt,updatedAt}]} ordered by seq (shown as D1, D2 ...). Read this before answering, or after waking up to see which of your questions were answered.',
+    'listDecisions', false, {
+      ticketId: P_TICKET_REF,
+      status: { type: 'string', enum: ['open', 'answered', 'withdrawn'], description: '只列這個狀態；省略＝全部' }
+    }, ['ticketId'], { title: '列出工單的待決事項' }, { v1: { action: 'listDecisions' } }),
+  tool('litejira.listDecisionsAskedToMe',
+    'Cross-project: open decision questions asked to the token owner (the web "等待處理" entry), via GET /decisions/asked-to-me, ordered by due date (no due date last). Each item carries ticket {id,key,title}. No cursor; limit 1-100.',
+    'listDecisionsAskedToMe', false, { limit: P_LIMIT }, [], { title: '列出問我的未答題' },
+    { v1: { action: 'listDecisionsAskedToMe' } }),
+  tool('litejira.openDecisions',
+    'Open 1-20 questions that need a human decision on a ticket, via POST /tickets/{ticketId}/decisions, body {decisions:[{question (1-200 chars), askedToId (member UUID from litejira://members), options? (0-6 strings, each 1-80; omit = free-form answer), context? (<=2000, Markdown), dueOn? (YYYY-MM-DD)}], sourceCommentId?}. All-or-nothing; each asked person gets one inbox notification per call. Use this INSTEAD of listing questions in a comment: keep technical findings in the comment and pass its id as sourceCommentId. Returns {items:[...]} with seq. Requires idempotencyKey; on an uncertain response listDecisions first, then retry only with the same key and identical input within 24 hours.',
+    'openDecisions', true, {
+      ticketId: P_TICKET_REF,
+      decisions: {
+        type: 'array', minItems: 1, maxItems: 20, description: '題目清單（1-20 題，全成或全敗）',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: '要對方決定什麼（1-200 字）' },
+            askedToId: { type: 'string', description: '被問的人（成員 UUID，一題一人）' },
+            options: { type: 'array', items: { type: 'string' }, description: '0-6 個選項；省略＝自由作答' },
+            context: { type: 'string', description: '背景（選填，≤2000 字）' },
+            dueOn: { type: 'string', description: '截止日 YYYY-MM-DD（選填）' }
+          },
+          required: ['question', 'askedToId']
+        }
+      },
+      sourceCommentId: { type: 'string', description: '從哪則留言開出來（留言 UUID，選填）' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'decisions', 'idempotencyKey'], { title: '開待決事項' }, { v1: { action: 'openDecisions' } }),
+  tool('litejira.answerDecision',
+    'Answer one open decision via POST /tickets/{ticketId}/decisions/{decisionId}/answer, body {option? (0-based index), text?, expectedUpdatedAt}. Only the asked person (or a member with edit-all permission, recorded as on-behalf) may answer. A question without options needs text. Answered or withdrawn questions return 409 state_conflict with the current state in details.decision; a stale expectedUpdatedAt returns 409 version_conflict.',
+    'answerDecision', true, {
+      ticketId: P_TICKET_REF,
+      decisionId: { type: 'string', description: 'listDecisions 回傳的題目 UUID' },
+      option: { type: 'integer', minimum: 0, description: '選第幾個選項（從 0 起算）' },
+      text: { type: 'string', description: '答覆或補充（沒有選項時必填，≤1000 字）' },
+      expectedUpdatedAt: { type: 'string', description: 'listDecisions 讀到的 updatedAt，原樣回填 ISO 字串' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'decisionId', 'expectedUpdatedAt', 'idempotencyKey'], { title: '回答待決事項' },
+    { v1: { action: 'answerDecision' } }),
+  tool('litejira.withdrawDecision',
+    'Withdraw one open decision that is no longer needed, via POST /tickets/{ticketId}/decisions/{decisionId}/withdraw, body {reason (1-200), expectedUpdatedAt}. Allowed for the opener, the asked person, the ticket assignee or owner, or edit-all members. Terminal: it cannot be reopened; open a new question instead.',
+    'withdrawDecision', true, {
+      ticketId: P_TICKET_REF,
+      decisionId: { type: 'string', description: 'listDecisions 回傳的題目 UUID' },
+      reason: { type: 'string', description: '撤回原因（必填）' },
+      expectedUpdatedAt: { type: 'string', description: 'listDecisions 讀到的 updatedAt，原樣回填 ISO 字串' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'decisionId', 'reason', 'expectedUpdatedAt', 'idempotencyKey'],
+    { title: '撤回待決事項', destructiveHint: true }, { v1: { action: 'withdrawDecision' } }),
+  tool('litejira.updateDecision',
+    'Edit an OPEN decision you opened via PATCH /tickets/{ticketId}/decisions/{decisionId}: send only the fields to change (question, context, askedToId, options, dueOn) plus expectedUpdatedAt. Changing askedToId notifies the new person. Answered or withdrawn questions cannot be edited (409): answers are final, open a new question to revisit.',
+    'updateDecision', true, {
+      ticketId: P_TICKET_REF,
+      decisionId: { type: 'string', description: 'listDecisions 回傳的題目 UUID' },
+      question: { type: 'string', description: '題目（1-200 字）' },
+      context: { type: 'string', description: '背景（傳 null 清空）' },
+      askedToId: { type: 'string', description: '改問這位成員（UUID）' },
+      options: { type: 'array', minItems: 0, maxItems: 6, items: { type: 'string' }, description: '整份取代選項（0-6 個；[]＝改成自由作答）' },
+      dueOn: { type: 'string', description: '截止日 YYYY-MM-DD（傳 null 清空）' },
+      expectedUpdatedAt: { type: 'string', description: 'listDecisions 讀到的 updatedAt，原樣回填 ISO 字串' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'decisionId', 'expectedUpdatedAt', 'idempotencyKey'], { title: '編輯待決事項' },
+    { v1: { action: 'updateDecision' } }),
+  tool('litejira.getSummary',
+    'Read the ticket current summary (status, who it is blocked on, next step, external dependencies) via GET /tickets/{ticketId}/summary; history=true also returns older versions newest-first. Returns {current:{version,statusText,blockedOn,blockedNote,nextStep,externalDeps,author,createdAt}|null, history?}. Read this first when picking up a ticket instead of reading every comment. Ticket dependencies are the blocked_by relations (listTicketRelations), not part of this summary.',
+    'getSummary', false, { ticketId: P_TICKET_REF, history: { type: 'boolean', description: '連同歷史版本' } },
+    ['ticketId'], { title: '讀目前摘要' }, { v1: { action: 'getSummary' } }),
+  tool('litejira.setSummary',
+    'Overwrite the ticket summary as a new version via PUT /tickets/{ticketId}/summary with ALL fields: {statusText (<=300; omit = empty), blockedOnIds (0-3 member UUIDs), blockedNote (<=100), nextStep (<=300), externalDeps (0-10 strings, each <=100), expectedVersion (current version, 0 if none)}. Plain text, keep it short; long analysis belongs in a comment. Requires edit permission (creator, assignee, owner, or edit-all). A stale expectedVersion returns 409 version_conflict with the current version in details: re-read and rewrite. No notification is sent. For ticket dependencies use addTicketRelation(kind=blocked_by).',
+    'setSummary', true, {
+      ticketId: P_TICKET_REF,
+      statusText: { type: 'string', description: '現況（≤300 字，可空字串）' },
+      blockedOnIds: { type: 'array', minItems: 0, maxItems: 3, items: { type: 'string' }, description: '卡在誰（0-3 位成員 UUID；[]＝沒有）' },
+      blockedNote: { type: 'string', description: '卡在什麼（≤100 字，可空字串）' },
+      nextStep: { type: 'string', description: '下一步（≤300 字，可空字串）' },
+      externalDeps: { type: 'array', minItems: 0, maxItems: 10, items: { type: 'string' }, description: '非工單的依賴（0-10 條；[]＝沒有）' },
+      expectedVersion: { type: 'integer', minimum: 0, description: '目前版本號（尚無摘要為 0）' },
+      idempotencyKey: P_IDEMPOTENCY
+    }, ['ticketId', 'blockedOnIds', 'externalDeps', 'expectedVersion', 'idempotencyKey'],
+    { title: '覆寫目前摘要' }, { v1: { action: 'setSummary' } }),
   tool('litejira.attachLink',
     'Attach a reference URL (doc, design, external page) to a ticket via API v1 (POST /tickets/{ticketId}/attachments). For the UI Add link section and MR/PR use addTicketLink instead. Body is exactly { url, name? } — v1 attachments have no "kind" classification. Returns the created attachment; keep its "id" — that id (NOT the url) is what litejira.removeAttachment needs.',
     'attachLink', true, {
@@ -1934,15 +2018,14 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           // 換上單欄更新的分流、批次的部分成功，以及 replyFeedback 非原子這三件會影響操作決策的事。
           instructions: [
             'LiteJira MCP v1：',
-            '- 寫入必帶 idempotencyKey；去重限 24 小時內＋輸入相同：結果不明先讀狀態，' +
-              '同 key 原輸入重送；換 key 或過期才重做。',
+            '- 寫入必帶 idempotencyKey（24 小時內同輸入去重）：結果不明先讀狀態，同 key 原輸入重送。',
             '- 建單填齊 reproSteps／expectedResult／日期／tags／ownerId 等正式欄位，別塞進 description。',
             // GH-313：reason 必填是三選一命中即算（direction=back／label=main不受影響／
             // requiresReason=true），第三項為 false 不代表可省略前兩項。
             '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[].label' +
               '（退回／main不受影響／requiresReason=true 任一必填 reason）。',
             '- updateField 單欄：status 要 force=true（限管理者），assigneeId 要 reason，版本／父工單收 UUID。',
-            '- batch 收 tickets（1-100）；回 succeeded/failed，200 非全成功，務必回報 failed。',
+            '- batch 收 tickets（1-100），200 也可能部分失敗，務必回報 failed。',
             '- replyFeedback 非原子：先流轉再留言，各一把衍生鍵；失敗如實回報部分成功。',
             // GH-317：只留會改變操作決策的兩件（URL 可不可以貼給人、上傳不能重試），
             // 欄位與認證細節在兩個工具的 schema 裡——預算不因新功能而放寬，其餘行同步壓縮。
@@ -1950,15 +2033,17 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
               '上傳無冪等鍵，先對帳不重送。',
             '- expectedUpdatedAt 原樣回填 ISO 字串，別轉毫秒（會撞假衝突）。',
             '- 工單參照可用 UUID／BUG-481／數字 key；成員條件只收 UUID，先讀 litejira://members。',
-            '- 讀 litejira://meta（受控值）／litejira://versions／litejira://workflow/{type}。',
+            '- 受控值讀 litejira://meta，另有 versions、workflow/{type}。',
             '- 專案層級資源取 LTJ_PROJECT 或 URI 的 ?project=KEY；無則報錯，不猜。',
             '- searchTickets 的 project 必填（同上），無「不帶＝全部」；' +
-              '跨專案僅 mine=assignee|creator|watcher，此時不可帶一般篩選。',
+              '跨專案僅 mine=assignee|creator|watcher|decision，此時不可帶一般篩選。',
             // GH-265 的 instructions 預算仍然成立（本行是換掉舊的「type/status 等可傳陣列多值」那一句，
             // 不是另開一行）：新增的能力只講「有哪些運算子」，細節在工具 schema 裡。
             '- 清單用 limit+cursor 分頁（上限 100）；各維度可多值＋XNot，' +
               'title/description 另有 XContains/XNotContains，還有 overdue、id（≤' + TICKET_ID_FILTER_MAX + '）。',
-            '- activity 用 kind=user|system 過濾，不帶＝全部。'
+            '- activity 用 kind=user|system 過濾，不帶＝全部。',
+            // GH-392：要人決定的事開成題目、不寫進留言散文；接手先讀摘要，不必從頭讀留言
+            '- 待決問題用 openDecisions，不寫進留言；接手先讀 getSummary。'
           ].join('\n')
         }
       };
@@ -2059,7 +2144,9 @@ function matchesSchema_(value, schema) {
   // 舊寫法會在收到單一字串時直接 return false。非陣列的值往下走一般型別檢查即可
   // （陣列在型別不允許時仍會被擋掉：typeof [] === 'object' 不在任何白名單裡）。
   if (types.indexOf('array') !== -1 && Array.isArray(value)) {
-    if (value.length === 0) return false;
+    // 空陣列預設擋（多值篩選給空陣列幾乎都是呼叫端的錯）；schema 明寫 minItems: 0 才放行——
+    // GH-392 摘要的「卡在誰」「外部依賴」清空就是空陣列，那是合法的整份覆寫
+    if (value.length === 0 && schema.minItems !== 0) return false;
     if (typeof schema.minItems === 'number' && value.length < schema.minItems) return false;
     if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return false;
     if (schema.items) {

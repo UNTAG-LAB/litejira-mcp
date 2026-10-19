@@ -6,6 +6,8 @@
 
 需要 LiteJira 2.16.0 以上的後端（2026-10-20 已上正式；`POST /tickets/{id}/comments` 收 `format=markdown`）。
 
+> ⚠️ **發版步驟**：LiteJira #434（網站 2.16.0）上 Dev、上正式並抽查通過之後，才合併本版並推 tag 發 npm。舊伺服器不認得 `format` 欄位，3.7.0 搭舊伺服器時**每一則**不帶 format 的留言都會被 422 拒絕。
+
 ### ⚠️ 預設行為改變：寫留言不帶 `format` 時改為 Markdown
 
 - `litejira.addComment`、`litejira.replyFeedback` 的 `format` 加 `markdown`，**預設 `markdown`**：內文原字送出並帶 `format=markdown`，由伺服器轉換、再走同一支白名單消毒。

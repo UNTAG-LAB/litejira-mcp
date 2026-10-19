@@ -33,6 +33,7 @@
 3. 看 Actions 的 `publish` 跑完（綠燈＝已發布且公開安裝驗證通過）。
 4. 用 `gh release create` 補 GitHub Release 說明，將連結納入網站公告的交接與驗收證據；workflow 不碰 Release。
 5. 將已公開驗證的版本交給網站唯一發布者，同步正式更新公告及未讀紅點，完成下列公告驗收。
+6. 確認框架庫 `UNTAG-LAB/Untaglab-Collab-Framework` 的教學沒有鎖舊版：在框架庫跑 `python -m unittest tests.test_litejira_mcp_install_latest`，或 `git grep -nE 'litejira-mcp@[0-9]' -- 00_Common` 確認零命中。框架教學的安裝指令一律寫 `@latest`。這版新增的功能若有最低版本要求（例如「X.Y.Z 以上才有某工具」），到框架庫對應技能更新門檻說明，並開框架 PR。2026-10-19 曾因教學寫死 `@3.1.0`，新人在 3.5.0 已發布時裝到舊版。
 
 重跑：Actions → `publish` → **Run workflow**，填要重跑的 tag（例 `v3.1.1`）。
 

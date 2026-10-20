@@ -509,8 +509,8 @@ const TOOL_DEFS = [
     'answerDecision', true, {
       ticketId: P_TICKET_REF,
       decisionId: { type: 'string', description: 'listDecisions 回傳的題目 UUID' },
-      option: { type: 'integer', minimum: 0, description: '選第幾個選項（從 0 起算）' },
-      text: { type: 'string', description: '答覆或補充（沒有選項時必填，≤1000 字）' },
+      option: { type: ['integer', 'null'], minimum: 0, description: '選第幾個選項（從 0 起算；null＝不選）' },
+      text: { type: ['string', 'null'], description: '答覆或補充（沒有選項時必填，≤1000 字；null＝不附）' },
       expectedUpdatedAt: { type: 'string', description: 'listDecisions 讀到的 updatedAt，原樣回填 ISO 字串' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'decisionId', 'expectedUpdatedAt', 'idempotencyKey'], { title: '回答待決事項' },
@@ -531,10 +531,10 @@ const TOOL_DEFS = [
       ticketId: P_TICKET_REF,
       decisionId: { type: 'string', description: 'listDecisions 回傳的題目 UUID' },
       question: { type: 'string', description: '題目（1-200 字）' },
-      context: { type: 'string', description: '背景（傳 null 清空）' },
+      context: { type: ['string', 'null'], description: '背景（傳 null 清空）' },
       askedToId: { type: 'string', description: '改問這位成員（UUID）' },
       options: { type: 'array', minItems: 0, maxItems: 6, items: { type: 'string' }, description: '整份取代選項（0-6 個；[]＝改成自由作答）' },
-      dueOn: { type: 'string', description: '截止日 YYYY-MM-DD（傳 null 清空）' },
+      dueOn: { type: ['string', 'null'], description: '截止日 YYYY-MM-DD（傳 null 清空）' },
       expectedUpdatedAt: { type: 'string', description: 'listDecisions 讀到的 updatedAt，原樣回填 ISO 字串' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'decisionId', 'expectedUpdatedAt', 'idempotencyKey'], { title: '編輯待決事項' },
@@ -2159,10 +2159,10 @@ function matchesSchema_(value, schema) {
   const jsType = typeof value;
   if (types.indexOf(jsType) === -1) {
     // integer 也走 number 路徑
-    if (!(schema.type === 'integer' && jsType === 'number')) return false;
+    if (!(types.indexOf('integer') !== -1 && jsType === 'number')) return false;
   }
-  // integer 要整數
-  if (schema.type === 'integer' && !Number.isInteger(value)) return false;
+  // integer 要整數（含 ['integer','null'] 聯集型別：GH-392 answerDecision.option 可傳 null）
+  if (types.indexOf('integer') !== -1 && types.indexOf('number') === -1 && !Number.isInteger(value)) return false;
   // 數值範圍
   if (jsType === 'number') {
     if (typeof schema.minimum === 'number' && value < schema.minimum) return false;

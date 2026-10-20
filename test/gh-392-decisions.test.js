@@ -100,3 +100,63 @@ test('searchTickets 的 mine 認得 decision（等待處理），跨專案', asy
   await callTool('litejira.searchTickets', { mine: 'decision' }, { ...cfg, project: '' }, r.fetch);
   assert.match(r.calls[0].url, /mine=decision/);
 });
+
+test('清空：updateDecision 的 context／dueOn 與 answerDecision 的 option／text 傳 null 送得出去，內文原樣帶 null', async () => {
+  // 審查 #9 必修 1：說明寫「傳 null 清空」，契約也收 null；參數只宣告 string 時會在本機被當成型別錯誤擋下，
+  // dueOn 又不能用空字串（日期格式不合），AI 就完全清不掉截止日。
+  const r = recorder({ data: {} });
+  await callTool('litejira.updateDecision', { ticketId: 'REQ-2330', decisionId: DECISION, context: null, dueOn: null, expectedUpdatedAt: AT, idempotencyKey: KEY + '_n1' }, cfg, r.fetch);
+  await callTool('litejira.answerDecision', { ticketId: 'REQ-2330', decisionId: DECISION, option: 1, text: null, expectedUpdatedAt: AT, idempotencyKey: KEY + '_n2' }, cfg, r.fetch);
+  await callTool('litejira.answerDecision', { ticketId: 'REQ-2330', decisionId: DECISION, option: null, text: '都不要', expectedUpdatedAt: AT, idempotencyKey: KEY + '_n3' }, cfg, r.fetch);
+  assert.equal(r.calls.length, 3);
+  assert.deepEqual(JSON.parse(r.calls[0].body), { context: null, dueOn: null, expectedUpdatedAt: AT });
+  assert.deepEqual(JSON.parse(r.calls[1].body), { option: 1, text: null, expectedUpdatedAt: AT });
+  assert.deepEqual(JSON.parse(r.calls[2].body), { option: null, text: '都不要', expectedUpdatedAt: AT });
+});
+
+test('清空放寬不放鬆其他檢查：option 仍要非負整數、context 仍不收數字', async () => {
+  const r = recorder({ data: {} });
+  const bad = [
+    ['litejira.answerDecision', { ticketId: 'REQ-1', decisionId: DECISION, option: 1.5, expectedUpdatedAt: AT, idempotencyKey: KEY }],
+    ['litejira.answerDecision', { ticketId: 'REQ-1', decisionId: DECISION, option: -1, expectedUpdatedAt: AT, idempotencyKey: KEY }],
+    ['litejira.updateDecision', { ticketId: 'REQ-1', decisionId: DECISION, context: 3, expectedUpdatedAt: AT, idempotencyKey: KEY }],
+  ];
+  for (const [name, args] of bad) {
+    await assert.rejects(callTool(name, args, cfg, r.fetch), (err) => err.code === 'VALIDATION_FAILED', name);
+  }
+  assert.equal(r.calls.length, 0, '一發都不該送出');
+});
+
+test('空陣列：setSummary 的 blockedOnIds／externalDeps 與 updateDecision 的 options 宣告 minItems:0，[] 可以送出', async () => {
+  // 審查 #9 必修 2：「清空就是空陣列」靠 schema 的 minItems:0 放行；其他多值參數的空陣列照舊擋
+  const r = recorder({ data: {} });
+  await callTool('litejira.setSummary', { ticketId: 'REQ-2330', blockedOnIds: [], externalDeps: [], expectedVersion: 3, idempotencyKey: KEY + '_e1' }, cfg, r.fetch);
+  await callTool('litejira.updateDecision', { ticketId: 'REQ-2330', decisionId: DECISION, options: [], expectedUpdatedAt: AT, idempotencyKey: KEY + '_e2' }, cfg, r.fetch);
+  assert.deepEqual(JSON.parse(r.calls[0].body), { blockedOnIds: [], externalDeps: [], expectedVersion: 3 });
+  assert.deepEqual(JSON.parse(r.calls[1].body), { options: [], expectedUpdatedAt: AT });
+  // 對照組：沒有宣告 minItems:0 的多值篩選，空陣列仍在本機擋下
+  await assert.rejects(callTool('litejira.searchTickets', { project: 'MAIN', status: [] }, cfg, r.fetch),
+    (err) => err.code === 'VALIDATION_FAILED');
+  assert.equal(r.calls.length, 2);
+});
+
+test('寫入開關：關閉時 5 支寫入工具回 WRITES_DISABLED、一發不送；3 支讀取工具照常', async () => {
+  // 審查 #9 必修 3：工具定義的寫入旗標錯成 false 時，寫入關閉也會照樣送出
+  const ro = { ...cfg, enableWrites: false };
+  const r = recorder({ data: { items: [] } });
+  const writes = [
+    ['litejira.openDecisions', { ticketId: 'REQ-1', decisions: [{ question: 'Q', askedToId: MEMBER }], idempotencyKey: KEY }],
+    ['litejira.answerDecision', { ticketId: 'REQ-1', decisionId: DECISION, option: 0, expectedUpdatedAt: AT, idempotencyKey: KEY }],
+    ['litejira.withdrawDecision', { ticketId: 'REQ-1', decisionId: DECISION, reason: '不需要了', expectedUpdatedAt: AT, idempotencyKey: KEY }],
+    ['litejira.updateDecision', { ticketId: 'REQ-1', decisionId: DECISION, question: 'Q2', expectedUpdatedAt: AT, idempotencyKey: KEY }],
+    ['litejira.setSummary', { ticketId: 'REQ-1', blockedOnIds: [], externalDeps: [], expectedVersion: 0, idempotencyKey: KEY }],
+  ];
+  for (const [name, args] of writes) {
+    await assert.rejects(callTool(name, args, ro, r.fetch), (err) => err.code === 'WRITES_DISABLED', name);
+  }
+  assert.equal(r.calls.length, 0, '寫入關閉時一發都不該送出');
+  await callTool('litejira.listDecisions', { ticketId: 'REQ-1' }, ro, r.fetch);
+  await callTool('litejira.listDecisionsAskedToMe', {}, ro, r.fetch);
+  await callTool('litejira.getSummary', { ticketId: 'REQ-1' }, ro, r.fetch);
+  assert.deepEqual(r.calls.map((c) => c.method), ['GET', 'GET', 'GET']);
+});

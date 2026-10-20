@@ -37,6 +37,17 @@
   - **移除且明確拒絕**：`assignee` / `owner` / `creator`（顯示名 → 改 UUID）、`version`（→ 拆成 `targetVersion` / `foundVersion`）、`responseMode`（v1 的 `GET /tickets` 沒有這個參數）。
     一律回 `VALIDATION_FAILED` 並在訊息裡指路，**不是**靜默忽略，也不是只回一句 unknown parameter。
 - **`listComments` / `getActivityLog` / `getTransitions`**：`ticketId` 放寬為「UUID / 公開 key（`BUG-481`）/ 純數字 key」三種形狀。
+  GH-360 補記：形狀放行不等於可以自行組字串——說明一律要求**沿用伺服器回傳的 `key` 字面值**
+  （新單純數字如 `2229`，舊單可能帶前綴如 `BUG-1205`，且前綴未必等於它現在的類型）。
+  客戶端無從判定自行組合的字串是否對應另一張工單，因此不作存在性斷言；
+  真有一張 key 為 `REQ-2229` 的舊單完全可能存在。正面講法是「key 不能據類型推得，必須以 server 回傳字面為準」。
+  pattern 不收緊、客戶端不拿前綴核對 type、也不自動 fallback（禁止自行拼、也禁止剝掉前綴重送）。
+  `not_found` 的指引一律條件措辭：不宣告存在性（後端對不存在／無權限／已軟刪除回同一個 404），
+  也不歸因到某一個參照——一發請求可能同時帶工單／父工單／連結／專案，404 不說是哪一個對不上，
+  因此指引會把本次帶到的參照全部列出，並明說「不要只憑這一句就改掉你已經核對過的那一個」。
+  覆蓋面：單筆工具、`resources/read`、批次 `failed[]` 的每一筆、以及複合工具 `litejira.replyFeedback`
+  共用同一段文字；批次的 `succeeded[]`、錯誤的 `code`／`message`／`details`、
+  `step`／`applied`／冪等語意一律不動，只多一個 `hint` 與人類可讀行。
   `getActivityLog` 改用 `kind=user|system` 單選（不帶 = 全部）；舊的 `includeComments` / `includeSystemEvents` 明確拒絕並指路。
 
 回應處理：傳輸層已拆掉唯一一層 `{ data }`，MCP 端把 `data` **原樣**送出，

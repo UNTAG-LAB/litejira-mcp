@@ -140,7 +140,10 @@ const LIST_VIEW_VALUES = Object.freeze(['full', 'compact']);
 // LiteJira GH-385：留言內文的格式。伺服器把留言一律當 HTML 解析再消毒（R-T18），
 // 所以純文字裡的 `<`（後接字母、/、!）會被當標籤吃掉後文，`&copy`、`&reg` 這類網址參數會變成符號。
 // 不叫模型自己跳脫（漏跳會遺失、跳兩次會出現 &amp;lt; 亂碼），由這裡統一做一次。
-const COMMENT_FORMAT_VALUES = Object.freeze(['text', 'html']);
+// LiteJira GH-428：加 markdown 並設為 MCP 的預設——轉換與消毒在伺服器（POST /comments 的 format），
+// 這裡只把原字與 format 一起送出。text 與 html 維持 3.5 的送法（不帶 format），舊伺服器也能用。
+const COMMENT_FORMAT_VALUES = Object.freeze(['markdown', 'text', 'html']);
+const DEFAULT_COMMENT_FORMAT = 'markdown';
 
 // 純文字 → 送出用的 HTML：& 先、< 後（順序反了會把剛產生的 &lt; 再跳一次），換行落成 <br>。
 // 必須是純函式：同一份輸入永遠得到同一個字串，冪等重送才不會撞 request_mismatch。
@@ -153,13 +156,30 @@ function plainTextToCommentHtml(text) {
     .replace(/\n/g, '<br>');
 }
 
+function invalidCommentFormat_(format) {
+  return new LiteJiraTransportError('invalid_argument',
+    'format 只接受 ' + COMMENT_FORMAT_VALUES.join(' | ') +
+      '（markdown＝伺服器轉換，text＝純文字自動跳脫，html＝原樣送出）',
+    { param: 'format', value: format, allowed: COMMENT_FORMAT_VALUES.slice() });
+}
+
+// 3.5 的送法（純文字跳脫或 HTML 原樣），未指定時是 text。CLI 與既有呼叫端沿用。
 function commentBodyForWire(body, format) {
   if (body === undefined || body === null) return body;
   if (format === undefined || format === 'text') return plainTextToCommentHtml(body);
   if (format === 'html') return body;
-  throw new LiteJiraTransportError('invalid_argument',
-    'format 只接受 ' + COMMENT_FORMAT_VALUES.join(' | ') + '（text＝純文字自動跳脫，html＝原樣送出）',
-    { param: 'format', value: format, allowed: COMMENT_FORMAT_VALUES.slice() });
+  throw invalidCommentFormat_(format);
+}
+
+// GH-428：留言送出的欄位（body，以及需要時的 format）。未指定 format 時用 MCP 預設 markdown。
+// 必須是純函式：同一份輸入永遠得到同一組欄位，冪等重送才不會撞 request_mismatch。
+function commentFieldsForWire(body, format) {
+  const effective = format === undefined ? DEFAULT_COMMENT_FORMAT : format;
+  if (effective === 'markdown') {
+    return body === undefined || body === null ? { body: body } : { body: String(body), format: 'markdown' };
+  }
+  if (effective === 'text' || effective === 'html') return { body: commentBodyForWire(body, effective) };
+  throw invalidCommentFormat_(format);
 }
 
 // ── 工單篩選維度登錄表（後端 P4.2d／P5.6 的完整查詢面）──────────────────────
@@ -458,9 +478,10 @@ const ACTION_MAP = Object.freeze({
     pathParams: Object.freeze(['ticketId']),
     query: Object.freeze({ allow: Object.freeze([]) }),
     body: Object.freeze({
-      allow: Object.freeze(['body', 'mentions']),
+      // format（GH-428）：markdown 由伺服器轉換；值域由伺服器裁決（不認得回 422）
+      allow: Object.freeze(['body', 'mentions', 'format']),
       required: Object.freeze(['body']),
-      string: Object.freeze(['body']),
+      string: Object.freeze(['body', 'format']),
       uuidArray: Object.freeze(['mentions'])
     }),
     rejected: Object.freeze({
@@ -1957,6 +1978,8 @@ module.exports = {
   COMMENT_FORMAT_VALUES,
   plainTextToCommentHtml,
   commentBodyForWire,
+  commentFieldsForWire,
+  DEFAULT_COMMENT_FORMAT,
   ORDER_VALUES,
   PENDING_CONTRACT_ACTIONS,
   REPLACED_ACTIONS,

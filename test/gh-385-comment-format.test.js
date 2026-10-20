@@ -67,17 +67,17 @@ test('對照表：純文字 → 送出字串（& 與 < 各跳脫一次、換行�
   }
 });
 
-test('addComment schema：format 只收 text|html', function () {
+test('addComment schema：format 收 markdown|text|html（GH-428 起預設 markdown）', function () {
   const def = listTools().find((t) => t.name === 'litejira.addComment');
-  assert.deepStrictEqual(def.inputSchema.properties.format.enum, ['text', 'html']);
+  assert.deepStrictEqual(def.inputSchema.properties.format.enum, ['markdown', 'text', 'html']);
   const reply = listTools().find((t) => t.name === 'litejira.replyFeedback');
-  assert.deepStrictEqual(reply.inputSchema.properties.format.enum, ['text', 'html']);
+  assert.deepStrictEqual(reply.inputSchema.properties.format.enum, ['markdown', 'text', 'html']);
 });
 
-test('addComment 不帶 format＝純文字：送出前自動跳脫，format 本身不送到伺服器', async function () {
+test('addComment format=text＝純文字：送出前自動跳脫，format 本身不送到伺服器', async function () {
   const fetchImpl = okFetch();
   await callTool('litejira.addComment',
-    { ticketId: TICKET, body: 'x<y & https://a.test/?a=1&copy=2', idempotencyKey: KEY }, cfg(), fetchImpl);
+    { ticketId: TICKET, body: 'x<y & https://a.test/?a=1&copy=2', format: 'text', idempotencyKey: KEY }, cfg(), fetchImpl);
   const [sent] = sentBodies(fetchImpl);
   assert.deepStrictEqual(sent, { body: 'x&lt;y &amp; https://a.test/?a=1&amp;copy=2' });
 });
@@ -92,14 +92,14 @@ test('addComment format=html：原樣送出', async function () {
 test('addComment format 不合法值本機擋下、一發都不送', async function () {
   const fetchImpl = okFetch();
   await assert.rejects(() => callTool('litejira.addComment',
-    { ticketId: TICKET, body: 'x', format: 'markdown', idempotencyKey: KEY }, cfg(), fetchImpl));
+    { ticketId: TICKET, body: 'x', format: 'md', idempotencyKey: KEY }, cfg(), fetchImpl));
   assert.strictEqual(fetchImpl.calls.length, 0);
 });
 
-test('replyFeedback 同一套：預設純文字跳脫、html 原樣', async function () {
+test('replyFeedback 同一套：text 純文字跳脫、html 原樣', async function () {
   const text = okFetch();
   await callTool('litejira.replyFeedback',
-    { ticketId: TICKET, content: 'List<int>\n下一行', idempotencyKey: KEY }, cfg(), text);
+    { ticketId: TICKET, content: 'List<int>\n下一行', format: 'text', idempotencyKey: KEY }, cfg(), text);
   assert.strictEqual(sentBodies(text)[0].body, 'List&lt;int><br>下一行');
   const html = okFetch();
   await callTool('litejira.replyFeedback',
@@ -110,7 +110,7 @@ test('replyFeedback 同一套：預設純文字跳脫、html 原樣', async func
 test('同一份輸入＋同一把鍵，送出字串逐字相同（冪等重送不會撞 request_mismatch）', async function () {
   const a = okFetch();
   const b = okFetch();
-  const args = { ticketId: TICKET, body: 'a<b&c\nd', idempotencyKey: KEY };
+  const args = { ticketId: TICKET, body: 'a<b&c\nd', format: 'text', idempotencyKey: KEY };
   await callTool('litejira.addComment', args, cfg(), a);
   await callTool('litejira.addComment', args, cfg(), b);
   assert.deepStrictEqual(sentBodies(a), sentBodies(b));

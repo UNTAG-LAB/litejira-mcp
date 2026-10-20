@@ -2,6 +2,25 @@
 
 只記使用者與呼叫端需要知道的變更；發布流程見 [docs/releasing.md](docs/releasing.md)。
 
+## 3.7.0（未發布）
+
+需要 LiteJira 2.16.0 以上的後端（2026-10-20 已上正式；`POST /tickets/{id}/comments` 收 `format=markdown`）。
+
+> ⚠️ **發版步驟**：LiteJira #434（網站 2.16.0）上 Dev、上正式並抽查通過之後，才合併本版並推 tag 發 npm。舊伺服器不認得 `format` 欄位，3.7.0 搭舊伺服器時**每一則**不帶 format 的留言都會被 422 拒絕。
+
+### ⚠️ 預設行為改變：寫留言不帶 `format` 時改為 Markdown
+
+- `litejira.addComment`、`litejira.replyFeedback` 的 `format` 加 `markdown`，**預設 `markdown`**：內文原字送出並帶 `format=markdown`，由伺服器轉換、再走同一支白名單消毒。
+- 支援標題、清單、粗體與斜體、行內程式碼、程式碼區塊、引用、分隔線、表格；連結只收 http／https；夾在 Markdown 裡的 HTML 標籤以字面顯示。
+- **受影響的呼叫者**：原本不帶 `format`、期待「原字純文字」的，`**`、`#`、`|` 這類字元現在會被當 Markdown。要原字請改帶 `format: "text"`（行為與 3.5 相同）。
+- `text`、`html` 的送法與 3.5 相同（不帶 `format` 欄位）。命令列 `ltj comment` 預設仍是 `text`，新增 `--format markdown`。
+- 升號理由：同 3.5.0，工具、參數與回傳結構都沒有移除或改名，只改「不帶參數時」的預設，加一個參數即可恢復。3.6.0 已由 LiteJira GH-392 預定，本版取 3.7.0。
+
+### 修正（LiteJira GH-360，litejira-mcp#4 併入）
+
+- 工單參照的說明改正：參照用 UUID 或伺服器回傳的 key 原字串（新單是純數字，例 2229；舊單可能帶前綴，例 BUG-1205），不要用類型代碼自行拼 key。
+- 找不到目標（not_found）時，錯誤指引列出這次請求帶到的所有參照，並說明回應不指出是哪一個對不上；批次工具的失敗項目也補上同樣的指引。錯誤碼、訊息與其他欄位不變。
+
 ## 3.6.0（未發布）
 
 需要 LiteJira 2.16.0 以上的後端（待決事項與目前摘要的端點由後端提供；發布前以正式區實際版號核對）。

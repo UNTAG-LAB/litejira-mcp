@@ -147,24 +147,24 @@ test('createTicket：既沒帶 project 也沒有 LTJ_PROJECT → 明確報錯且
   assert.strictEqual(fetchImpl.calls.length, 0);
 });
 
-// 後端已核對過的建單欄位全集：核心 6 欄 + 18 個選填欄位。
+// 後端已核對過的建單欄位全集：核心 6 欄 + 19 個選填欄位（GH-568 加 planningDoneDate）。
 const CREATE_OPTIONAL_FIELDS = [
   'module', 'subtype', 'releaseMethod', 'stdLevel2', 'stdLevel3',
-  'startDate', 'dueDate', 'tags', 'mrUrl',
+  'startDate', 'dueDate', 'planningDoneDate', 'tags', 'mrUrl',
   'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
   'verifiableVersionAlpha', 'verifiableVersionRelease',
   'ownerId', 'targetVersion', 'foundVersion'
 ];
 
 // 全欄位建單：一次填齊，逐欄核對真的送出去的 body（不是「有收下」而已）。
-test('createTicket：18 個選填欄位全部帶齊時，原樣平攤進 body 送出', async function () {
+test('createTicket：19 個選填欄位全部帶齊時，原樣平攤進 body 送出', async function () {
   const fetchImpl = okFetch({ id: UUID, key: 'BUG-483' });
   const full = {
     project: 'LTJ', type: 'BUG', title: '登入逾時', priority: 'P1-高',
     description: '登入後 30 秒被登出', assigneeId: UUID2, ownerId: UUID3,
     module: '帳號', subtype: '功能缺陷', releaseMethod: '熱更',
     stdLevel2: '安全', stdLevel3: '驗證',
-    startDate: '2026-09-14', dueDate: '2026-09-30',
+    startDate: '2026-09-14', dueDate: '2026-09-30', planningDoneDate: '2026-09-13',
     tags: ['登入', '逾時'], mrUrl: 'https://git.example.com/mr/42',
     reproSteps: '1. 登入 2. 等 30 秒', expectedResult: '維持登入狀態',
     fixMethod: '延長 session', validationMethod: '手動驗證',

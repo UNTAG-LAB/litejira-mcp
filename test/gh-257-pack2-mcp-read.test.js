@@ -173,13 +173,15 @@ test('searchTickets 成員條件只收 UUID，顯示名參數被明確拒絕並�
   assert.strictEqual(fetchImpl.calls.length, 0);
 });
 
-test('searchTickets 的 sort 值域＝後端欄位登錄表的 15 個可排序欄位（GH-313 補齊）', async function () {
+test('searchTickets 的 sort 值域＝後端欄位登錄表的 16 個可排序欄位（GH-313 補齊）', async function () {
   const def = listTools().find((t) => t.name === 'litejira.searchTickets');
-  // 事實源：v2/contracts/src/ticket-fields.ts 的 `TICKET_FIELDS`（`sortable: true` 那 15 筆）。
+  // 事實源：v2/contracts/src/ticket-fields.ts 的 `TICKET_FIELDS`（`sortable: true` 那 16 筆）。
   assert.deepStrictEqual(def.inputSchema.properties.sort.enum, [
     'updatedAt', 'createdAt', 'key', 'type', 'title', 'status', 'priority',
     'assignee', 'owner', 'creator', 'module', 'targetVersion', 'foundVersion',
-    'startDate', 'dueDate'
+    'startDate', 'dueDate',
+    // LiteJira GH-568：規劃完成日可排序（16 欄）
+    'planningDoneDate'
   ]);
 
   const fetchImpl = okFetch({ items: [] });

@@ -72,7 +72,7 @@ const ENUM_CREATE_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK', 'STD']; // API v1 CREAT
 const ENUM_CONVERT_TARGET_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK'];
 const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中文後綴
 // GH-257：order / sort 值域改以傳輸層契約表為單一事實源，避免兩處漂移。
-// GH-313：sort 是後端欄位登錄表推導的 15 欄（舊註解說「只有三個」是漏抄，不是契約）。
+// GH-313：sort 是後端欄位登錄表推導的 16 欄（GH-568 起）（舊註解說「只有三個」是漏抄，不是契約）。
 const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
 // GH-313：跨專案查詢唯一的入口（後端 MINE_DIMS）。
@@ -327,7 +327,7 @@ const TOOL_DEFS = [
       },
       limit: P_LIMIT,
       cursor: P_CURSOR,
-      sort: { type: 'string', description: 'Sort field（v1 契約值域，15 欄；預設 updatedAt）', enum: ENUM_SORT },
+      sort: { type: 'string', description: 'Sort field（v1 契約值域，16 欄；預設 updatedAt）', enum: ENUM_SORT },
       order: P_ORDER,
       view: {
         type: 'string',
@@ -756,7 +756,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.updateField',
-    'Update ONE ticket field. One tool, five v1 routes — the field decides which: (a) ordinary fields (title, priority, description, module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId) go to PATCH /tickets/{id} and take NO reason; (b) parentId goes to PUT /parent and takes a parent UUID or null; (c) assigneeId goes to PUT /assignee and REQUIRES reason; (d) targetVersion / foundVersion go to PUT /versions and take a version UUID or null (read litejira://versions — NOT the version name), with reason required by the server whenever the value actually changes; (e) status goes to the ADMIN-ONLY PUT /status and requires force=true. Renames: verifyMethod→validationMethod, owner→ownerId, assignee→assigneeId, version→targetVersion/foundVersion. "notes" has NO v1 equivalent — write it into description yourself; this tool will not move text between fields. field=status WITHOUT force=true is rejected locally: normal transitions MUST go through litejira.transitionTicket (action labels, role auto-reassign, send-test field gate). force=true only bypasses workflow PATH validation and only for admins (the server decides); the send-test required fields still apply, and force is never part of the request body. Values: null clears (including priority); tags is an array of strings; dates are YYYY-MM-DD; text fields accept "" except title. FIELDS FIRST: when a field exists for the information (MR link via mrUrl or litejira.addTicketLink kind=mr, validationMethod, verifiableVersionAlpha/Release, fixMethod), set it here instead of writing it into a comment; dependencies between tickets go to litejira.addTicketRelation, not text.',
+    'Update ONE ticket field. One tool, five v1 routes — the field decides which: (a) ordinary fields (title, priority, description, module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, planningDoneDate) go to PATCH /tickets/{id} and take NO reason; (b) parentId goes to PUT /parent and takes a parent UUID or null; (c) assigneeId goes to PUT /assignee and REQUIRES reason; (d) targetVersion / foundVersion go to PUT /versions and take a version UUID or null (read litejira://versions — NOT the version name), with reason required by the server whenever the value actually changes; (e) status goes to the ADMIN-ONLY PUT /status and requires force=true. Renames: verifyMethod→validationMethod, owner→ownerId, assignee→assigneeId, version→targetVersion/foundVersion. "notes" has NO v1 equivalent — write it into description yourself; this tool will not move text between fields. field=status WITHOUT force=true is rejected locally: normal transitions MUST go through litejira.transitionTicket (action labels, role auto-reassign, send-test field gate). force=true only bypasses workflow PATH validation and only for admins (the server decides); the send-test required fields still apply, and force is never part of the request body. Values: null clears (including priority); tags is an array of strings; dates are YYYY-MM-DD; text fields accept "" except title. FIELDS FIRST: when a field exists for the information (MR link via mrUrl or litejira.addTicketLink kind=mr, validationMethod, verifiableVersionAlpha/Release, fixMethod), set it here instead of writing it into a comment; dependencies between tickets go to litejira.addTicketRelation, not text.',
     'updateField', true, {
       ticketId: P_TICKET_REF,
       field: {
@@ -767,7 +767,7 @@ const TOOL_DEFS = [
       value: {
         type: ['string', 'null', 'array'],
         description: '新值（必填，要清空就明確傳 null）。型別依 field 而定：' +
-          'tags 傳字串陣列；startDate / dueDate 傳 YYYY-MM-DD；' +
+          'tags 傳字串陣列；startDate / dueDate / planningDoneDate 傳 YYYY-MM-DD（planningDoneDate 只有 REQ／EPIC 可填）；' +
           'ownerId / assigneeId / parentId / targetVersion / foundVersion 傳 UUID（成員讀 litejira://members、版本讀 litejira://versions、父工單用其 id）；' +
           'priority / module / subtype / releaseMethod 等受控值讀 litejira://meta；status 傳目標狀態名（僅配 force=true）。',
         items: { type: 'string' }
@@ -800,7 +800,7 @@ const TOOL_DEFS = [
     }),
   // LJ-095 新增（5 個）
   tool('litejira.createTicket',
-    'Create a ticket via API v1 (POST /tickets). Body is FLAT — core fields: project, type, title, priority?, description?, assigneeId?. ALL of these optional fields are supported too and go straight into the create call (do NOT stuff them into description and do NOT wait until after creation): module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, targetVersion, foundVersion. The 18 additional fields may be null; core priority/description/assigneeId may be omitted but not null; dates are YYYY-MM-DD; tags is an array of strings; assigneeId / ownerId are member UUIDs (display names are NOT accepted — read litejira://members). Controlled values (type / priority / releaseMethod / module / subtype / version strings) come from litejira://meta and litejira://versions; releaseMethod is validated by the server. NOT part of create: status (the workflow start status applies — use litejira.transitionTicket), parentId (create first, then litejira.linkTickets) and expectedUpdatedAt (nothing to lock yet). targetVersion / foundVersion here are version NAMES.',
+    'Create a ticket via API v1 (POST /tickets). Body is FLAT — core fields: project, type, title, priority?, description?, assigneeId?. ALL of these optional fields are supported too and go straight into the create call (do NOT stuff them into description and do NOT wait until after creation): module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, planningDoneDate, targetVersion, foundVersion. planningDoneDate (規劃完成日, YYYY-MM-DD) is accepted ONLY for REQ and EPIC — other types get 422; date order is 建立日 ≤ planningDoneDate ≤ startDate ≤ dueDate (same day allowed). The 19 additional fields may be null; core priority/description/assigneeId may be omitted but not null; dates are YYYY-MM-DD; tags is an array of strings; assigneeId / ownerId are member UUIDs (display names are NOT accepted — read litejira://members). Controlled values (type / priority / releaseMethod / module / subtype / version strings) come from litejira://meta and litejira://versions; releaseMethod is validated by the server. NOT part of create: status (the workflow start status applies — use litejira.transitionTicket), parentId (create first, then litejira.linkTickets) and expectedUpdatedAt (nothing to lock yet). targetVersion / foundVersion here are version NAMES.',
     'createTicket', true, {
       project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；' +
         '正式站（litejira.untaglab.com）即使沒設 LTJ_PROJECT 也有內建預設主專案 MAIN。' +
@@ -819,6 +819,8 @@ const TOOL_DEFS = [
       stdLevel3: P_CREATE_TEXT('規範三級分類（STD 用）'),
       startDate: P_CREATE_DATE('開始日期'),
       dueDate: P_CREATE_DATE('到期日'),
+      // LiteJira GH-568：只有 REQ／EPIC 可填；其他類型傳非 null 值伺服器回 422
+      planningDoneDate: P_CREATE_DATE('規劃完成日（只有 REQ／EPIC 可填；順序：建立日 ≤ 規劃完成日 ≤ 開始日 ≤ 到期日）'),
       tags: {
         type: ['array', 'null'],
         description: '標籤（字串陣列）。null = 不設；不要傳逗號串接的單一字串。',

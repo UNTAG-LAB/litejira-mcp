@@ -2,6 +2,19 @@
 
 只記使用者與呼叫端需要知道的變更；發布流程見 [docs/releasing.md](docs/releasing.md)。
 
+## 3.8.0（未發布）
+
+需要 LiteJira 加上「規劃完成日」的後端（LiteJira GH-568 Phase B）。舊伺服器不認得 `planningDoneDate`：建單或修改時帶了它會被 422 拒絕；不帶它的呼叫不受影響。
+
+> ⚠️ **發版步驟**：LiteJira GH-568 的 Phase B 上 Dev、上正式並抽查通過之後，才合併本版並推 tag 發 npm。
+
+### 新增（LiteJira GH-568）
+
+- `litejira.updateField`、`litejira.batchSetField`、`litejira.createTicket` 收 `planningDoneDate`（規劃完成日，`YYYY-MM-DD`，`null` 清空）。只有 REQ、EPIC 可填，其他類型由伺服器回 422。
+- 日期順序由伺服器檢查：建立日 ≤ 規劃完成日 ≤ 開始日 ≤ 到期日，同一天可以。
+- `litejira.searchTickets` 的 `sort` 加 `planningDoneDate`（16 欄）。
+- 升號理由：只加欄位與排序值，沒有移除或改名。
+
 ## 3.7.0（未發布）
 
 需要 LiteJira 2.16.0 以上的後端（2026-10-20 已上正式；`POST /tickets/{id}/comments` 收 `format=markdown`）。

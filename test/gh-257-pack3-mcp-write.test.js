@@ -157,14 +157,17 @@ const CREATE_OPTIONAL_FIELDS = [
 ];
 
 // 全欄位建單：一次填齊，逐欄核對真的送出去的 body（不是「有收下」而已）。
+// ⚠️ 用 REQ：planningDoneDate 只有 REQ／EPIC 可填（其他類型伺服器回 422）。MCP 只原樣傳遞、
+//    不複製伺服器規則，這裡驗的是「平攤進 body」；日期也照順序排（建立日 ≤ 規劃完成 ≤ 開始 ≤ 到期），
+//    免得讀者以為這組值真的送得進去以外的組合也行。
 test('createTicket：19 個選填欄位全部帶齊時，原樣平攤進 body 送出', async function () {
-  const fetchImpl = okFetch({ id: UUID, key: 'BUG-483' });
+  const fetchImpl = okFetch({ id: UUID, key: 'REQ-483' });
   const full = {
-    project: 'LTJ', type: 'BUG', title: '登入逾時', priority: 'P1-高',
+    project: 'LTJ', type: 'REQ', title: '登入逾時', priority: 'P1-高',
     description: '登入後 30 秒被登出', assigneeId: UUID2, ownerId: UUID3,
     module: '帳號', subtype: '功能缺陷', releaseMethod: '熱更',
     stdLevel2: '安全', stdLevel3: '驗證',
-    startDate: '2026-09-14', dueDate: '2026-09-30', planningDoneDate: '2026-09-13',
+    planningDoneDate: '2099-09-13', startDate: '2099-09-14', dueDate: '2099-09-30',
     tags: ['登入', '逾時'], mrUrl: 'https://git.example.com/mr/42',
     reproSteps: '1. 登入 2. 等 30 秒', expectedResult: '維持登入狀態',
     fixMethod: '延長 session', validationMethod: '手動驗證',
@@ -186,7 +189,7 @@ test('createTicket：19 個選填欄位全部帶齊時，原樣平攤進 body �
   assert.ok(fetchImpl.calls[0].init.body.indexOf(KEY) === -1);
 });
 
-test('createTicket：18 個附加資料欄可以明確傳 null', async function () {
+test('createTicket：19 個附加資料欄可以明確傳 null', async function () {
   const fetchImpl = okFetch({ id: UUID });
   const args = { type: 'BUG', title: 'x', idempotencyKey: KEY };
   CREATE_OPTIONAL_FIELDS.forEach(function (key) { args[key] = null; });

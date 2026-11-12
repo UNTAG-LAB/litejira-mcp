@@ -11,7 +11,7 @@
 ### 新增（LiteJira GH-568）
 
 - `litejira.updateField`、`litejira.batchSetField`、`litejira.createTicket` 收 `planningDoneDate`（規劃完成日，`YYYY-MM-DD`，`null` 清空）。只有 REQ、EPIC 可填，其他類型由伺服器回 422。
-- 日期順序由伺服器檢查：建立日 ≤ 規劃完成日 ≤ 開始日 ≤ 到期日，同一天可以。
+- 日期順序由伺服器檢查：建立日 ≤ 規劃完成日 ≤ 到期日，同一天可以；與開始日先後不限。
 - `litejira.searchTickets` 的 `sort` 加 `planningDoneDate`（16 欄）。
 - 升號理由：只加欄位與排序值，沒有移除或改名。
 

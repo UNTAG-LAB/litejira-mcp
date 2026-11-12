@@ -158,7 +158,7 @@ const CREATE_OPTIONAL_FIELDS = [
 
 // 全欄位建單：一次填齊，逐欄核對真的送出去的 body（不是「有收下」而已）。
 // ⚠️ 用 REQ：planningDoneDate 只有 REQ／EPIC 可填（其他類型伺服器回 422），日期也依順序排
-//    （建立日 ≤ 規劃完成日 ≤ 開始日 ≤ 到期日）。本測試只驗「每個欄位都平攤進 body」，
+//    （建立日 ≤ 規劃完成日 ≤ 到期日）。本測試只驗「每個欄位都平攤進 body」，
 //    不代表伺服器會接受這組值——MCP 只原樣傳遞、不複製伺服器規則。
 test('createTicket：19 個選填欄位全部帶齊時，原樣平攤進 body 送出', async function () {
   const fetchImpl = okFetch({ id: UUID, key: 'REQ-483' });

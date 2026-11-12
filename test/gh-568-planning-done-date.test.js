@@ -44,7 +44,7 @@ test('GH-568：planningDoneDate 是一般欄位、可排序', function () {
   assert.match(create.description, /planningDoneDate[^.]*ONLY for REQ and EPIC/);
   // 第二輪審查：updateField／batchSetField 的說明也要講清楚類型限制與日期順序（改字時這裡會紅）
   assert.match(update.description, /planningDoneDate is ONLY for REQ and EPIC — other types get 422/);
-  assert.match(update.description, /建立日 ≤ planningDoneDate ≤ startDate ≤ dueDate/);
+  assert.match(update.description, /建立日 ≤ planningDoneDate ≤ dueDate \(no order vs startDate\)/);
   const batch = listTools().find(function (t) { return t.name === 'litejira.batchSetField'; });
   assert.match(batch.description, /planningDoneDate is ONLY for REQ and EPIC: a non-null value fails per ticket with 422/);
   assert.match(batch.inputSchema.properties.value.description, /planningDoneDate 只限 REQ／EPIC，其他類型逐張 422/);

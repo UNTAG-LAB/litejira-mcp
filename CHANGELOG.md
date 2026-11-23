@@ -18,6 +18,7 @@
 ### 說明修正（LiteJira GH-436、GH-575）
 
 - `litejira.transitionTicket`、`litejira.batchTransition` 的 `fields` 說明：送測三欄改成 GH-436 之後的「發布方式＋預期結果＋驗證&重現方式」（修復方式改選填），檢查時機改成 GH-575 之後的「進待合併至 alpha／待更新至 release／熱修待合 release」，「送alpha測試」「送release測試」不再因三欄被擋。只改說明，行為由伺服器決定。
+- `litejira.createTicket` 的欄位說明與 `report-bug` 引導對齊 GH-436 的欄位名：`expectedResult`＝預期結果（BUG／REQ 送測必填）、`validationMethod`＝驗證&重現方式（重現步驟寫這裡）、`fixMethod`＝調整&修復方式（選填）；`reproSteps` 標為舊欄位、送測不看。
 
 ## 3.7.0（未發布）
 

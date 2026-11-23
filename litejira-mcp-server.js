@@ -827,10 +827,10 @@ const TOOL_DEFS = [
         items: { type: 'string' }
       },
       mrUrl: P_CREATE_TEXT('MR / PR 連結'),
-      reproSteps: P_CREATE_TEXT('重現步驟（BUG 用）—— 這是獨立欄位，不要併進 description'),
-      expectedResult: P_CREATE_TEXT('預期結果（BUG 用）—— 這是獨立欄位，不要併進 description'),
-      fixMethod: P_CREATE_TEXT('修復方式'),
-      validationMethod: P_CREATE_TEXT('驗證方式（舊名 verifyMethod）'),
+      reproSteps: P_CREATE_TEXT('重現步驟（舊欄位）—— LiteJira GH-436 起送測不看這欄；重現步驟請寫進 validationMethod（驗證&重現方式）'),
+      expectedResult: P_CREATE_TEXT('預期結果 —— BUG／REQ 送測必填（LiteJira GH-436）；獨立欄位，不要併進 description'),
+      fixMethod: P_CREATE_TEXT('調整&修復方式（選填）'),
+      validationMethod: P_CREATE_TEXT('驗證&重現方式（舊名 verifyMethod）—— BUG／REQ 送測必填（LiteJira GH-436）；重現步驟也寫在這裡'),
       verifiableVersionAlpha: P_CREATE_TEXT('可驗證版本（alpha）'),
       verifiableVersionRelease: P_CREATE_TEXT('可驗證版本（release）'),
       targetVersion: P_CREATE_TEXT('目標版本「名稱」（不是版本 UUID）。動態值，請先讀 litejira://versions'),
@@ -1136,7 +1136,7 @@ const RESOURCE_DEFS = [
 const PROMPT_DEFS = [
   {
     name: 'report-bug',
-    description: '回報 BUG — 引導填寫標題/重現步驟/預期結果，讀 meta/members/versions 備妥受控值，草稿確認後用 litejira.createTicket 建單',
+    description: '回報 BUG — 引導填寫標題/預期結果/驗證&重現方式，讀 meta/members/versions 備妥受控值，草稿確認後用 litejira.createTicket 建單',
     arguments: [
       { name: 'title', description: 'BUG 標題（可選，會再確認）', required: false },
       { name: 'project', description: '專案 key（可選；省略則用啟動設定的 LTJ_PROJECT）', required: false }
@@ -2521,9 +2521,9 @@ function getPromptMessages_(name, args) {
             projectClause_(project) +
             '請先讀 litejira://meta（類型/優先級/子類型/模塊受控值）、litejira://members（成員名冊，含 UUID id）、' +
             'litejira://versions（版本清單），一律採用讀回來的實際值，不要沿用記憶中的舊值域。' +
-            '然後問我：標題、重現步驟、預期結果、優先級、發現版本。' +
+            '然後問我：標題、預期結果、驗證&重現方式（含重現步驟）、優先級、發現版本。' +
             '先輸出一份建單草稿（欄位: 值），成員欄位請同時列出顯示名與 UUID id；我確認後再用 litejira.createTicket 建單。' +
-            '重現步驟與預期結果請放在 reproSteps / expectedResult 這兩個獨立欄位（不要併進 description）；' +
+            '預期結果與驗證&重現方式請放在 expectedResult / validationMethod 這兩個獨立欄位（不要併進 description），重現步驟寫進 validationMethod、不要用舊欄位 reproSteps（送測不看它）；' +
             'module / subtype / releaseMethod / startDate / dueDate（YYYY-MM-DD）/ tags（字串陣列）/ mrUrl / ownerId / ' +
             'targetVersion / foundVersion 等欄位建單時就能一次填齊，不用建完再補；沒有值就傳 null 或整個省略。' +
             WRITE_NOTE

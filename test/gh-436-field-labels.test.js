@@ -41,3 +41,19 @@ test('GH-436：report-bug 引導問預期結果與驗證&重現方式，不叫�
   // 反向：舊引導「重現步驟放 reproSteps」不得改回來
   assert.doesNotMatch(text, /重現步驟與預期結果請放在 reproSteps/);
 });
+
+test('GH-436：啟動說明與留言工具的 FIELDS FIRST 不再把助手導向 reproSteps（第六輪審查）', async function () {
+  const fetchImpl = function () { throw new Error('不應該送出任何請求'); };
+  const config = { apiUrl: 'https://litejira.example.com', token: 'ltj_pat_test_abcdefgh', project: 'LTJ', enableWrites: true };
+  const init = await handleJsonRpcRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, config, fetchImpl);
+  const instructions = init.result.instructions;
+  assert.match(instructions, /建單填齊 expectedResult／validationMethod／日期／tags 等正式欄位/);
+  assert.doesNotMatch(instructions, /reproSteps/);
+  assert.ok(instructions.length <= 1000, 'instructions 長度 ' + instructions.length + ' 超出預算');
+  ['litejira.addComment', 'litejira.replyFeedback'].forEach(function (name) {
+    const tool = listTools().find(function (x) { return x.name === name; });
+    assert.ok(tool, name + ' 要存在');
+    assert.match(tool.description, /validation & repro method \(validationMethod — repro steps go here\)/);
+    assert.doesNotMatch(tool.description, /fix method, repro steps →/);
+  });
+});

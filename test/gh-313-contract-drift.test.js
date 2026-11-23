@@ -153,11 +153,13 @@ test('GH-313：啟動 instructions 講明搜尋的專案必填與跨專案限制
 
 // ── 靶 2：sort 值域 ─────────────────────────────────────────────────────
 
-test('GH-313：sort 值域＝後端登錄表的 15 個可排序欄位，工具與傳輸層同一份', function () {
+test('GH-313：sort 值域＝後端登錄表的 16 個可排序欄位，工具與傳輸層同一份', function () {
   const expected = [
     'updatedAt', 'createdAt', 'key', 'type', 'title', 'status', 'priority',
     'assignee', 'owner', 'creator', 'module', 'targetVersion', 'foundVersion',
-    'startDate', 'dueDate'
+    'startDate', 'dueDate',
+    // LiteJira GH-568：規劃完成日可排序（16 欄）
+    'planningDoneDate'
   ];
   assert.deepStrictEqual(SORT_VALUES.slice(), expected);
   assert.deepStrictEqual(searchDef().inputSchema.properties.sort.enum, expected);

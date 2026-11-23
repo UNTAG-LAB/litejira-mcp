@@ -72,7 +72,7 @@ const ENUM_CREATE_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK', 'STD']; // API v1 CREAT
 const ENUM_CONVERT_TARGET_TYPES = ['EPIC', 'REQ', 'BUG', 'TASK'];
 const ENUM_PRIORITIES = ['P0-緊急', 'P1-高', 'P2-中', 'P3-低']; // 含中文後綴
 // GH-257：order / sort 值域改以傳輸層契約表為單一事實源，避免兩處漂移。
-// GH-313：sort 是後端欄位登錄表推導的 15 欄（舊註解說「只有三個」是漏抄，不是契約）。
+// GH-313：sort 是後端欄位登錄表推導的 16 欄（GH-568 起）（舊註解說「只有三個」是漏抄，不是契約）。
 const ENUM_ORDER = ORDER_VALUES.slice();
 const ENUM_SORT = SORT_VALUES.slice();
 // GH-313：跨專案查詢唯一的入口（後端 MINE_DIMS）。
@@ -327,7 +327,7 @@ const TOOL_DEFS = [
       },
       limit: P_LIMIT,
       cursor: P_CURSOR,
-      sort: { type: 'string', description: 'Sort field（v1 契約值域，15 欄；預設 updatedAt）', enum: ENUM_SORT },
+      sort: { type: 'string', description: 'Sort field（v1 契約值域，16 欄；預設 updatedAt）', enum: ENUM_SORT },
       order: P_ORDER,
       view: {
         type: 'string',
@@ -417,7 +417,7 @@ const TOOL_DEFS = [
   // 這裡沿用同樣的步驟順序，另外做三件舊版沒做的事：每步一把穩定且互不相同的冪等鍵、
   // 流轉失敗就不送留言、留言失敗時如實回報「流轉已生效、留言沒送成」。
   tool('litejira.replyFeedback',
-    'Post a comment on a ticket, optionally preceded by a status transition. NOT ATOMIC and never was: this is a CLIENT-SIDE COMPOSITE of two v1 calls in a fixed order — (1) POST /transitions if "transition" is given, then (2) POST /comments. There is no rollback. If the transition fails the comment is NOT sent (you get the transition error). If the comment fails AFTER a successful transition you get an explicit partial-success error naming the completed step. Each step uses its own stable idempotency key derived from your idempotencyKey. Dedupe is NOT unlimited: it holds only inside the server\'s 24h idempotency retention window AND only for a byte-identical retry, so a same-key retry of the whole call re-uses the already-applied step only within that window — after it expires, or with a new key, the step really runs a second time. On an unknown outcome (5xx / network / idempotency_key_reused with details.reason=in_progress) do NOT auto-retry and do NOT mint a new key: read the current ticket state first. On details.reason=request_mismatch the payload you just sent was rejected, but the outcome of the EARLIER request under that key is not proven — inspect state and resume only the step that is genuinely missing. The transition takes an ACTION LABEL (call litejira.getTransitions first) — v1 does NOT accept a target status name. For comment-only, prefer litejira.addComment; expectedUpdatedAt is accepted ONLY together with a transition (the comment endpoint has no optimistic lock). FIELDS FIRST: do NOT write information that has its own field into comment text — MR/PR link → litejira.addTicketLink (kind=mr); validation method, verifiable versions, fix method, repro steps → litejira.updateField; dependencies between tickets → litejira.addTicketRelation. Comments are for discussion, decisions and open questions.',
+    'Post a comment on a ticket, optionally preceded by a status transition. NOT ATOMIC and never was: this is a CLIENT-SIDE COMPOSITE of two v1 calls in a fixed order — (1) POST /transitions if "transition" is given, then (2) POST /comments. There is no rollback. If the transition fails the comment is NOT sent (you get the transition error). If the comment fails AFTER a successful transition you get an explicit partial-success error naming the completed step. Each step uses its own stable idempotency key derived from your idempotencyKey. Dedupe is NOT unlimited: it holds only inside the server\'s 24h idempotency retention window AND only for a byte-identical retry, so a same-key retry of the whole call re-uses the already-applied step only within that window — after it expires, or with a new key, the step really runs a second time. On an unknown outcome (5xx / network / idempotency_key_reused with details.reason=in_progress) do NOT auto-retry and do NOT mint a new key: read the current ticket state first. On details.reason=request_mismatch the payload you just sent was rejected, but the outcome of the EARLIER request under that key is not proven — inspect state and resume only the step that is genuinely missing. The transition takes an ACTION LABEL (call litejira.getTransitions first) — v1 does NOT accept a target status name. For comment-only, prefer litejira.addComment; expectedUpdatedAt is accepted ONLY together with a transition (the comment endpoint has no optimistic lock). FIELDS FIRST: do NOT write information that has its own field into comment text — MR/PR link → litejira.addTicketLink (kind=mr); expected result (expectedResult), validation & repro method (validationMethod — repro steps go here), verifiable versions, fix method → litejira.updateField; dependencies between tickets → litejira.addTicketRelation. Comments are for discussion, decisions and open questions.',
     'replyFeedback', true, {
       ticketId: P_TICKET_REF,
       content: { type: 'string', description: COMMENT_BODY_DESCRIPTION + '會以 POST /tickets/{id}/comments 的 body 送出。' },
@@ -756,7 +756,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.updateField',
-    'Update ONE ticket field. One tool, five v1 routes — the field decides which: (a) ordinary fields (title, priority, description, module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId) go to PATCH /tickets/{id} and take NO reason; (b) parentId goes to PUT /parent and takes a parent UUID or null; (c) assigneeId goes to PUT /assignee and REQUIRES reason; (d) targetVersion / foundVersion go to PUT /versions and take a version UUID or null (read litejira://versions — NOT the version name), with reason required by the server whenever the value actually changes; (e) status goes to the ADMIN-ONLY PUT /status and requires force=true. Renames: verifyMethod→validationMethod, owner→ownerId, assignee→assigneeId, version→targetVersion/foundVersion. "notes" has NO v1 equivalent — write it into description yourself; this tool will not move text between fields. field=status WITHOUT force=true is rejected locally: normal transitions MUST go through litejira.transitionTicket (action labels, role auto-reassign, send-test field gate). force=true only bypasses workflow PATH validation and only for admins (the server decides); the send-test required fields still apply, and force is never part of the request body. Values: null clears (including priority); tags is an array of strings; dates are YYYY-MM-DD; text fields accept "" except title. FIELDS FIRST: when a field exists for the information (MR link via mrUrl or litejira.addTicketLink kind=mr, validationMethod, verifiableVersionAlpha/Release, fixMethod), set it here instead of writing it into a comment; dependencies between tickets go to litejira.addTicketRelation, not text.',
+    'Update ONE ticket field. One tool, five v1 routes — the field decides which: (a) ordinary fields (title, priority, description, module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, planningDoneDate) go to PATCH /tickets/{id} and take NO reason (planningDoneDate is ONLY for REQ and EPIC — other types get 422; null always clears; date order is 建立日 ≤ planningDoneDate ≤ dueDate (no order vs startDate), same day allowed, checked against the current dates on the ticket — changing startDate or dueDate re-checks the whole set, so moving dueDate before an existing planningDoneDate also gets 422); (b) parentId goes to PUT /parent and takes a parent UUID or null; (c) assigneeId goes to PUT /assignee and REQUIRES reason; (d) targetVersion / foundVersion go to PUT /versions and take a version UUID or null (read litejira://versions — NOT the version name), with reason required by the server whenever the value actually changes; (e) status goes to the ADMIN-ONLY PUT /status and requires force=true. Renames: verifyMethod→validationMethod, owner→ownerId, assignee→assigneeId, version→targetVersion/foundVersion. "notes" has NO v1 equivalent — write it into description yourself; this tool will not move text between fields. field=status WITHOUT force=true is rejected locally: normal transitions MUST go through litejira.transitionTicket (action labels, role auto-reassign, send-test field gate). force=true only bypasses workflow PATH validation and only for admins (the server decides); the send-test required fields still apply, and force is never part of the request body. Values: null clears (including priority); tags is an array of strings; dates are YYYY-MM-DD; text fields accept "" except title. FIELDS FIRST: when a field exists for the information (MR link via mrUrl or litejira.addTicketLink kind=mr, validationMethod, verifiableVersionAlpha/Release, fixMethod), set it here instead of writing it into a comment; dependencies between tickets go to litejira.addTicketRelation, not text.',
     'updateField', true, {
       ticketId: P_TICKET_REF,
       field: {
@@ -767,7 +767,7 @@ const TOOL_DEFS = [
       value: {
         type: ['string', 'null', 'array'],
         description: '新值（必填，要清空就明確傳 null）。型別依 field 而定：' +
-          'tags 傳字串陣列；startDate / dueDate 傳 YYYY-MM-DD；' +
+          'tags 傳字串陣列；startDate / dueDate / planningDoneDate 傳 YYYY-MM-DD（planningDoneDate 只有 REQ／EPIC 可填）；' +
           'ownerId / assigneeId / parentId / targetVersion / foundVersion 傳 UUID（成員讀 litejira://members、版本讀 litejira://versions、父工單用其 id）；' +
           'priority / module / subtype / releaseMethod 等受控值讀 litejira://meta；status 傳目標狀態名（僅配 force=true）。',
         items: { type: 'string' }
@@ -800,7 +800,7 @@ const TOOL_DEFS = [
     }),
   // LJ-095 新增（5 個）
   tool('litejira.createTicket',
-    'Create a ticket via API v1 (POST /tickets). Body is FLAT — core fields: project, type, title, priority?, description?, assigneeId?. ALL of these optional fields are supported too and go straight into the create call (do NOT stuff them into description and do NOT wait until after creation): module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, targetVersion, foundVersion. The 18 additional fields may be null; core priority/description/assigneeId may be omitted but not null; dates are YYYY-MM-DD; tags is an array of strings; assigneeId / ownerId are member UUIDs (display names are NOT accepted — read litejira://members). Controlled values (type / priority / releaseMethod / module / subtype / version strings) come from litejira://meta and litejira://versions; releaseMethod is validated by the server. NOT part of create: status (the workflow start status applies — use litejira.transitionTicket), parentId (create first, then litejira.linkTickets) and expectedUpdatedAt (nothing to lock yet). targetVersion / foundVersion here are version NAMES.',
+    'Create a ticket via API v1 (POST /tickets). Body is FLAT — core fields: project, type, title, priority?, description?, assigneeId?. ALL of these optional fields are supported too and go straight into the create call (do NOT stuff them into description and do NOT wait until after creation): module, subtype, releaseMethod, stdLevel2, stdLevel3, startDate, dueDate, tags, mrUrl, reproSteps, expectedResult, fixMethod, validationMethod, verifiableVersionAlpha, verifiableVersionRelease, ownerId, planningDoneDate, targetVersion, foundVersion. planningDoneDate (規劃完成日, YYYY-MM-DD) is accepted ONLY for REQ and EPIC — other types get 422; date order is 建立日 ≤ planningDoneDate ≤ dueDate (no order vs startDate) (same day allowed). The 19 additional fields may be null; core priority/description/assigneeId may be omitted but not null; dates are YYYY-MM-DD; tags is an array of strings; assigneeId / ownerId are member UUIDs (display names are NOT accepted — read litejira://members). Controlled values (type / priority / releaseMethod / module / subtype / version strings) come from litejira://meta and litejira://versions; releaseMethod is validated by the server. NOT part of create: status (the workflow start status applies — use litejira.transitionTicket), parentId (create first, then litejira.linkTickets) and expectedUpdatedAt (nothing to lock yet). targetVersion / foundVersion here are version NAMES.',
     'createTicket', true, {
       project: { type: 'string', description: '專案 key。省略時採用啟動環境的 LTJ_PROJECT；' +
         '正式站（litejira.untaglab.com）即使沒設 LTJ_PROJECT 也有內建預設主專案 MAIN。' +
@@ -819,16 +819,18 @@ const TOOL_DEFS = [
       stdLevel3: P_CREATE_TEXT('規範三級分類（STD 用）'),
       startDate: P_CREATE_DATE('開始日期'),
       dueDate: P_CREATE_DATE('到期日'),
+      // LiteJira GH-568：只有 REQ／EPIC 可填；其他類型傳非 null 值伺服器回 422
+      planningDoneDate: P_CREATE_DATE('規劃完成日（只有 REQ／EPIC 可填；順序：建立日 ≤ 規劃完成日 ≤ 到期日，與開始日先後不限）'),
       tags: {
         type: ['array', 'null'],
         description: '標籤（字串陣列）。null = 不設；不要傳逗號串接的單一字串。',
         items: { type: 'string' }
       },
       mrUrl: P_CREATE_TEXT('MR / PR 連結'),
-      reproSteps: P_CREATE_TEXT('重現步驟（BUG 用）—— 這是獨立欄位，不要併進 description'),
-      expectedResult: P_CREATE_TEXT('預期結果（BUG 用）—— 這是獨立欄位，不要併進 description'),
-      fixMethod: P_CREATE_TEXT('修復方式'),
-      validationMethod: P_CREATE_TEXT('驗證方式（舊名 verifyMethod）'),
+      reproSteps: P_CREATE_TEXT('重現步驟（舊欄位）—— LiteJira GH-436 起送測不看這欄；重現步驟請寫進 validationMethod（驗證&重現方式）'),
+      expectedResult: P_CREATE_TEXT('預期結果 —— BUG／REQ 送測必填（LiteJira GH-436）；獨立欄位，不要併進 description'),
+      fixMethod: P_CREATE_TEXT('調整&修復方式（選填）'),
+      validationMethod: P_CREATE_TEXT('驗證&重現方式（舊名 verifyMethod）—— BUG／REQ 送測必填（LiteJira GH-436）；重現步驟也寫在這裡'),
       verifiableVersionAlpha: P_CREATE_TEXT('可驗證版本（alpha）'),
       verifiableVersionRelease: P_CREATE_TEXT('可驗證版本（release）'),
       targetVersion: P_CREATE_TEXT('目標版本「名稱」（不是版本 UUID）。動態值，請先讀 litejira://versions'),
@@ -854,7 +856,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.addComment',
-    'Post a comment on a ticket via API v1 (POST /tickets/{ticketId}/comments). Body is { body, mentions? } — the comment text parameter is "body", and mentions is an array of member UUIDs (read litejira://members). This endpoint does NOT transition status and does NOT take an optimistic lock: to change status, call litejira.transitionTicket separately. FIELDS FIRST: do NOT write information that has its own field into comment text — MR/PR link → litejira.addTicketLink (kind=mr); validation method, verifiable versions, fix method, repro steps → litejira.updateField; dependencies between tickets → litejira.addTicketRelation. Comments are for discussion, decisions and open questions.',
+    'Post a comment on a ticket via API v1 (POST /tickets/{ticketId}/comments). Body is { body, mentions? } — the comment text parameter is "body", and mentions is an array of member UUIDs (read litejira://members). This endpoint does NOT transition status and does NOT take an optimistic lock: to change status, call litejira.transitionTicket separately. FIELDS FIRST: do NOT write information that has its own field into comment text — MR/PR link → litejira.addTicketLink (kind=mr); expected result (expectedResult), validation & repro method (validationMethod — repro steps go here), verifiable versions, fix method → litejira.updateField; dependencies between tickets → litejira.addTicketRelation. Comments are for discussion, decisions and open questions.',
     'addComment', true, {
       ticketId: P_TICKET_REF,
       body: { type: 'string', description: COMMENT_BODY_DESCRIPTION },
@@ -900,7 +902,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.convertTicketType',
-    'Convert a ticket to another type via API v1 (POST /tickets/{ticketId}/type). Body is { type, subtype?, expectedUpdatedAt? } — the target parameter is "type", not "newType". Valid targets are EPIC / REQ / BUG / TASK only: IDEA and STD can NOT be conversion targets (an IDEA/STD ticket may still be converted away to one of the four).',
+    'Convert a ticket to another type via API v1 (POST /tickets/{ticketId}/type). Body is { type, subtype?, expectedUpdatedAt? } — the target parameter is "type", not "newType". Valid targets are EPIC / REQ / BUG / TASK only: IDEA and STD can NOT be conversion targets (an IDEA/STD ticket may still be converted away to one of the four). Converting a REQ/EPIC to BUG/TASK clears its planningDoneDate (規劃完成日) server-side.',
     'convertTicketType', true, {
       ticketId: P_TICKET_REF,
       type: {
@@ -946,7 +948,7 @@ const TOOL_DEFS = [
           '前進類的「main不受影響」／該動作 getTransitions 回報 requiresReason=true' +
           '（第三條為 false 不代表前兩條也可省略）。空白字串等同沒填，伺服器會回 invalid_argument（field=reason）。'
       },
-      fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項與欄位名以 getTransitions 的回應與伺服器錯誤訊息為準。' },
+      fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。BUG／REQ 進「待合併至 alpha」「待更新至 release」「熱修待合 release」時（例如「合併至alpha」「進release」「熱修送測」與各種修復重送），要先備齊送測三欄：releaseMethod（發布方式，不可為「待定」）、expectedResult（預期結果）、validationMethod（驗證&重現方式）；fixMethod（修復方式）是選填。「送alpha測試」「送release測試」不再因這三欄被擋（LiteJira GH-575）。送測三欄不會出現在 getTransitions 的 requiredFields；缺項以伺服器 422 回應的 details.missing 為準（欄位名陣列）。伺服器若還沒換成新的檢查函式，會照舊時機和舊三欄（含 fixMethod）檢查，一樣以 details.missing 為準。其他動作的必填仍看 getTransitions 的 requiredFields。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'action', 'idempotencyKey'], {
@@ -986,7 +988,7 @@ const TOOL_DEFS = [
           '前進類的「main不受影響」／該動作 requiresReason=true（第三條為 false 不代表前兩條也可省略）。' +
           '沒帶時那幾張會整批落在 failed[]。'
       },
-      fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項以 getTransitions 的回應與伺服器錯誤為準。' },
+      fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。BUG／REQ 進「待合併至 alpha」「待更新至 release」「熱修待合 release」時（例如「合併至alpha」「進release」「熱修送測」與各種修復重送），要先備齊送測三欄：releaseMethod（發布方式，不可為「待定」）、expectedResult（預期結果）、validationMethod（驗證&重現方式）；fixMethod（修復方式）是選填。「送alpha測試」「送release測試」不再因這三欄被擋（LiteJira GH-575）。送測三欄不會出現在 getTransitions 的 requiredFields；缺項以伺服器 422 回應的 details.missing 為準（欄位名陣列）。伺服器若還沒換成新的檢查函式，會照舊時機和舊三欄（含 fixMethod）檢查，一樣以 details.missing 為準。其他動作的必填仍看 getTransitions 的 requiredFields。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['tickets', 'action', 'idempotencyKey'], {
       idempotentHint: true,
@@ -1024,7 +1026,7 @@ const TOOL_DEFS = [
       }
     }),
   tool('litejira.batchSetField',
-    'Batch set ONE field to the SAME value across MANY tickets in ONE call via API v1. Ordinary fields and parentId go to POST /tickets/batch/fields as { tickets, fields:{ field: value } }; targetVersion / foundVersion go to POST /tickets/batch/versions as { tickets, targetVersionId|foundVersionId, reason? } and take a version UUID or null (read litejira://versions — NOT the version name). parentId here accepts a ticket REF (UUID or the server-returned key verbatim; never synthesize a key from the ticket type) or null, unlike the single-ticket parent route which takes a UUID; parent/child relations are validated server-side per ticket. status is NOT a batch field — use litejira.batchTransition. NO optimistic lock. PARTIAL SUCCESS IS THE NORM: returns { succeeded:[{ticket,id,key,status,assignee}], failed:[{ticket,error:{code,message,details?}}] } with HTTP 200 even when some tickets failed — always read failed[] and report it. Batch and per-ticket permissions are enforced by the server; do NOT loop single-ticket writes to get around a denial.',
+    'Batch set ONE field to the SAME value across MANY tickets in ONE call via API v1. Ordinary fields and parentId go to POST /tickets/batch/fields as { tickets, fields:{ field: value } }; targetVersion / foundVersion go to POST /tickets/batch/versions as { tickets, targetVersionId|foundVersionId, reason? } and take a version UUID or null (read litejira://versions — NOT the version name). parentId here accepts a ticket REF (UUID or the server-returned key verbatim; never synthesize a key from the ticket type) or null, unlike the single-ticket parent route which takes a UUID; parent/child relations are validated server-side per ticket. status is NOT a batch field — use litejira.batchTransition. planningDoneDate is ONLY for REQ and EPIC: a non-null value fails per ticket with 422 for any other type (select only REQ/EPIC tickets); date order (建立日 ≤ planningDoneDate ≤ dueDate) is also checked per ticket against the current dates of that ticket, failing per ticket with 422. NO optimistic lock. PARTIAL SUCCESS IS THE NORM: returns { succeeded:[{ticket,id,key,status,assignee}], failed:[{ticket,error:{code,message,details?}}] } with HTTP 200 even when some tickets failed — always read failed[] and report it. Batch and per-ticket permissions are enforced by the server; do NOT loop single-ticket writes to get around a denial.',
     'batchSetField', true, {
       tickets: P_TICKETS,
       field: {
@@ -1034,7 +1036,7 @@ const TOOL_DEFS = [
       },
       value: {
         type: ['string', 'null', 'array'],
-        description: '新值（必填，全批共用；要清空就明確傳 null）。tags 傳字串陣列；日期傳 YYYY-MM-DD；' +
+        description: '新值（必填，全批共用；要清空就明確傳 null）。tags 傳字串陣列；日期傳 YYYY-MM-DD（planningDoneDate 只限 REQ／EPIC，其他類型逐張 422）；' +
           'ownerId 傳成員 UUID；targetVersion / foundVersion 傳版本 UUID；parentId 傳工單參照（UUID 或回應中的 key 原字串）或 null；' +
           '受控值（priority / module / subtype / releaseMethod…）請先讀 litejira://meta。',
         items: { type: 'string' }
@@ -1134,7 +1136,7 @@ const RESOURCE_DEFS = [
 const PROMPT_DEFS = [
   {
     name: 'report-bug',
-    description: '回報 BUG — 引導填寫標題/重現步驟/預期結果，讀 meta/members/versions 備妥受控值，草稿確認後用 litejira.createTicket 建單',
+    description: '回報 BUG — 引導填寫標題/預期結果/驗證&重現方式，讀 meta/members/versions 備妥受控值，草稿確認後用 litejira.createTicket 建單',
     arguments: [
       { name: 'title', description: 'BUG 標題（可選，會再確認）', required: false },
       { name: 'project', description: '專案 key（可選；省略則用啟動設定的 LTJ_PROJECT）', required: false }
@@ -2113,7 +2115,7 @@ async function handleJsonRpcRequest(request, config, fetchImpl) {
           instructions: [
             'LiteJira MCP v1：',
             '- 寫入必帶 idempotencyKey（24 小時內同輸入去重）：結果不明先讀狀態，同 key 原輸入重送。',
-            '- 建單填齊 reproSteps／expectedResult／日期／tags／ownerId 等正式欄位，別塞進 description。',
+            '- 建單填齊 expectedResult／validationMethod／日期／tags 等正式欄位，別塞進 description。',
             // GH-313：reason 必填是三選一命中即算（direction=back／label=main不受影響／
             // requiresReason=true），第三項為 false 不代表可省略前兩項。
             '- 改狀態走 transitionTicket：先 getTransitions 取 data.actions[].label' +
@@ -2519,9 +2521,9 @@ function getPromptMessages_(name, args) {
             projectClause_(project) +
             '請先讀 litejira://meta（類型/優先級/子類型/模塊受控值）、litejira://members（成員名冊，含 UUID id）、' +
             'litejira://versions（版本清單），一律採用讀回來的實際值，不要沿用記憶中的舊值域。' +
-            '然後問我：標題、重現步驟、預期結果、優先級、發現版本。' +
+            '然後問我：標題、預期結果、驗證&重現方式（含重現步驟）、優先級、發現版本。' +
             '先輸出一份建單草稿（欄位: 值），成員欄位請同時列出顯示名與 UUID id；我確認後再用 litejira.createTicket 建單。' +
-            '重現步驟與預期結果請放在 reproSteps / expectedResult 這兩個獨立欄位（不要併進 description）；' +
+            '預期結果與驗證&重現方式請放在 expectedResult / validationMethod 這兩個獨立欄位（不要併進 description），重現步驟寫進 validationMethod、不要用舊欄位 reproSteps（送測不看它）；' +
             'module / subtype / releaseMethod / startDate / dueDate（YYYY-MM-DD）/ tags（字串陣列）/ mrUrl / ownerId / ' +
             'targetVersion / foundVersion 等欄位建單時就能一次填齊，不用建完再補；沒有值就傳 null 或整個省略。' +
             WRITE_NOTE

@@ -82,7 +82,9 @@ const NORMAL_FIELDS = Object.freeze([
   'title', 'priority', 'description', 'module', 'subtype', 'releaseMethod',
   'stdLevel2', 'stdLevel3', 'startDate', 'dueDate', 'tags', 'mrUrl',
   'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
-  'verifiableVersionAlpha', 'verifiableVersionRelease', 'ownerId'
+  'verifiableVersionAlpha', 'verifiableVersionRelease', 'ownerId',
+  // LiteJira GH-568：規劃完成日（只有 REQ／EPIC 收非 null 值，其他類型由伺服器回 422）
+  'planningDoneDate'
 ]);
 const NORMAL_TEXT_FIELDS = Object.freeze([
   'title', 'priority', 'description', 'module', 'subtype', 'releaseMethod',
@@ -105,7 +107,7 @@ const NORMAL_FIELD_SHAPE = Object.freeze({
   string: NORMAL_TEXT_FIELDS,
   allowEmptyString: NORMAL_EMPTY_OK_FIELDS,
   uuid: Object.freeze(['ownerId']),
-  date: Object.freeze(['startDate', 'dueDate']),
+  date: Object.freeze(['startDate', 'dueDate', 'planningDoneDate']),
   stringArray: Object.freeze(['tags'])
 });
 // 批次 fields 物件可放的鍵：一般欄位 + parentId。
@@ -122,13 +124,15 @@ const BATCH_FIELD_SHAPE = Object.freeze({
 });
 
 // GH-313：可排序欄位的事實源是後端 contracts 的工單欄位登錄表（`TICKET_FIELDS` 的 `sortable` 旗標，
-// v2/contracts/src/ticket-fields.ts:29-67），推導出 15 欄。
+// v2/contracts/src/ticket-fields.ts），推導出 16 欄（GH-568 加 planningDoneDate）。
 // 舊版只列 updatedAt / createdAt / key —— 那不是契約值，是漏抄：後果是合法的
 // `sort=priority`、`sort=dueDate` 在本機就被擋掉，呼叫端拿到「客戶端說不行」而伺服器其實收。
 const SORT_VALUES = Object.freeze([
   'updatedAt', 'createdAt', 'key', 'type', 'title', 'status', 'priority',
   'assignee', 'owner', 'creator', 'module', 'targetVersion', 'foundVersion',
-  'startDate', 'dueDate'
+  'startDate', 'dueDate',
+  // LiteJira GH-568：16 欄（後端 ticket-fields.ts 新增 planningDoneDate）
+  'planningDoneDate'
 ]);
 const ORDER_VALUES = Object.freeze(['asc', 'desc']);
 // GH-313：唯一天然跨專案的篩選維度（後端 read-queries.ts 的 `MINE_DIMS`，R-A15 三）。
@@ -665,16 +669,16 @@ const ACTION_MAP = Object.freeze({
       allow: Object.freeze([
         'project', 'type', 'title', 'priority', 'description', 'assigneeId',
         'module', 'subtype', 'releaseMethod', 'stdLevel2', 'stdLevel3',
-        'startDate', 'dueDate', 'tags', 'mrUrl',
+        'startDate', 'dueDate', 'planningDoneDate', 'tags', 'mrUrl',
         'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
         'verifiableVersionAlpha', 'verifiableVersionRelease',
         'ownerId', 'targetVersion', 'foundVersion'
       ]),
       required: Object.freeze(['project', 'type', 'title']),
-      // 18 個附加資料欄可 null；核心 priority / description / assigneeId 可省略但不可 null。
+      // 19 個附加資料欄可 null（GH-568 加 planningDoneDate）；核心 priority / description / assigneeId 可省略但不可 null。
       nullable: Object.freeze([
         'module', 'subtype', 'releaseMethod', 'stdLevel2', 'stdLevel3',
-        'startDate', 'dueDate', 'tags', 'mrUrl',
+        'startDate', 'dueDate', 'planningDoneDate', 'tags', 'mrUrl',
         'reproSteps', 'expectedResult', 'fixMethod', 'validationMethod',
         'verifiableVersionAlpha', 'verifiableVersionRelease',
         'ownerId', 'targetVersion', 'foundVersion'
@@ -696,7 +700,7 @@ const ACTION_MAP = Object.freeze({
         'targetVersion', 'foundVersion'
       ]),
       uuid: Object.freeze(['assigneeId', 'ownerId']),
-      date: Object.freeze(['startDate', 'dueDate']),
+      date: Object.freeze(['startDate', 'dueDate', 'planningDoneDate']),
       stringArray: Object.freeze(['tags'])
     }),
     rejected: Object.freeze({

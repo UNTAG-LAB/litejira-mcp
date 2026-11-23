@@ -15,6 +15,10 @@
 - `litejira.searchTickets` 的 `sort` 加 `planningDoneDate`（16 欄）。
 - 升號理由：只加欄位與排序值，沒有移除或改名。
 
+### 說明修正（LiteJira GH-436、GH-575）
+
+- `litejira.transitionTicket`、`litejira.batchTransition` 的 `fields` 說明：送測三欄改成 GH-436 之後的「發布方式＋預期結果＋驗證&重現方式」（修復方式改選填），檢查時機改成 GH-575 之後的「進待合併至 alpha／待更新至 release／熱修待合 release」，「送alpha測試」「送release測試」不再因三欄被擋。只改說明，行為由伺服器決定。
+
 ## 3.7.0（未發布）
 
 需要 LiteJira 2.16.0 以上的後端（2026-10-20 已上正式；`POST /tickets/{id}/comments` 收 `format=markdown`）。

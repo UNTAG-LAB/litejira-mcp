@@ -948,7 +948,7 @@ const TOOL_DEFS = [
           '前進類的「main不受影響」／該動作 getTransitions 回報 requiresReason=true' +
           '（第三條為 false 不代表前兩條也可省略）。空白字串等同沒填，伺服器會回 invalid_argument（field=reason）。'
       },
-      fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項與欄位名以 getTransitions 的回應與伺服器錯誤訊息為準。' },
+      fields: { type: 'object', description: '該動作連帶要填的欄位（物件）。BUG／REQ 進「待合併至 alpha」「待更新至 release」「熱修待合 release」時（例如「合併至alpha」「進release」「熱修送測」與各種修復重送），要先備齊送測三欄：releaseMethod（發布方式，不可為「待定」）、expectedResult（預期結果）、validationMethod（驗證&重現方式）；fixMethod（修復方式）是選填。「送alpha測試」「送release測試」不再因這三欄被擋（LiteJira GH-575）。實際必填項與欄位名以 getTransitions 的回應與伺服器錯誤訊息為準。' },
       expectedUpdatedAt: P_EXPECTED_UPDATED_AT,
       idempotencyKey: P_IDEMPOTENCY
     }, ['ticketId', 'action', 'idempotencyKey'], {
@@ -988,7 +988,7 @@ const TOOL_DEFS = [
           '前進類的「main不受影響」／該動作 requiresReason=true（第三條為 false 不代表前兩條也可省略）。' +
           '沒帶時那幾張會整批落在 failed[]。'
       },
-      fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。送測類動作需要修復方式 / 驗證方式 / 發布方式這類欄位；實際必填項以 getTransitions 的回應與伺服器錯誤為準。' },
+      fields: { type: 'object', description: '該動作連帶要填的欄位（物件，全批共用）。BUG／REQ 進「待合併至 alpha」「待更新至 release」「熱修待合 release」時（例如「合併至alpha」「進release」「熱修送測」與各種修復重送），要先備齊送測三欄：releaseMethod（發布方式，不可為「待定」）、expectedResult（預期結果）、validationMethod（驗證&重現方式）；fixMethod（修復方式）是選填。「送alpha測試」「送release測試」不再因這三欄被擋（LiteJira GH-575）。實際必填項以 getTransitions 的回應與伺服器錯誤為準。' },
       idempotencyKey: P_IDEMPOTENCY
     }, ['tickets', 'action', 'idempotencyKey'], {
       idempotentHint: true,

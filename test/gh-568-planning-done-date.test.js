@@ -110,28 +110,34 @@ test('GH-568：planningDoneDate 的日期形狀在本機先擋（同 startDate�
 });
 
 test('GH-568：updateField／batchSetField 的 planningDoneDate 壞日期在本機就擋，不發請求（審查 M2）', async function () {
+  const DATE_ERR = /參數「planningDoneDate」必須是 YYYY-MM-DD 格式的日期/;
+  const isDateError = function (err) {
+    return err instanceof LiteJiraTransportError && err.code === 'invalid_argument' && DATE_ERR.test(err.message);
+  };
+  const batch = function (value) {
+    return buildRequest({
+      baseUrl: BASE, token: TOKEN, action: 'batchSetField', idempotencyKey: KEY,
+      params: { tickets: ['REQ-100'], fields: { planningDoneDate: value } }
+    });
+  };
+  const update = async function (value, fetchImpl) {
+    return callTool('litejira.updateField', {
+      ticketId: 'REQ-100', field: 'planningDoneDate', value: value, idempotencyKey: KEY
+    }, cfg(), fetchImpl);
+  };
+
+  // 對照組：同樣的寫法、日期正確就要能通過——證明下面被擋是因為日期，不是參數形狀（審查第二輪）
+  assert.doesNotThrow(function () { batch('2026-11-20'); }, 'batchSetField 正確日期要能組出請求');
+  const okImpl = okFetch({ id: UUID, key: 'REQ-100' });
+  await update('2026-11-20', okImpl);
+  assert.strictEqual(okImpl.calls.length, 1, 'updateField 正確日期要發出請求');
+
   for (const bad of ['2026/11/20', '2026-02-30', '20261120']) {
-    // batchSetField：buildRequest 就要擋
-    assert.throws(function () {
-      buildRequest({
-        baseUrl: BASE, token: TOKEN, action: 'batchSetField', idempotencyKey: KEY,
-        params: { tickets: ['REQ-100'], field: 'planningDoneDate', value: bad }
-      });
-    }, function (err) {
-      return err instanceof LiteJiraTransportError && err.code === 'invalid_argument';
-    }, 'batchSetField ' + bad);
-    // updateField：走 callTool，要回錯而且一次都沒有打出去
+    assert.throws(function () { batch(bad); }, isDateError, 'batchSetField ' + bad);
     const fetchImpl = okFetch({ id: UUID, key: 'REQ-100' });
-    let failed = false;
-    try {
-      const out = await callTool('litejira.updateField', {
-        ticketId: 'REQ-100', field: 'planningDoneDate', value: bad, idempotencyKey: KEY
-      }, cfg(), fetchImpl);
-      failed = Boolean(out && out.isError);
-    } catch (err) {
-      failed = true;
-    }
-    assert.ok(failed, 'updateField ' + bad + ' 必須被擋');
+    // 工具層會把傳輸層錯誤包成 MCP 錯誤，類型不同、訊息原樣保留 ⇒ 核對訊息
+    await assert.rejects(update(bad, fetchImpl), function (err) { return DATE_ERR.test(err.message); },
+      'updateField ' + bad);
     assert.strictEqual(fetchImpl.calls.length, 0, 'updateField ' + bad + ' 不得發出請求');
   }
 });

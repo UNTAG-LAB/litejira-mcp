@@ -4,7 +4,7 @@
 
 ## 3.8.0（未發布）
 
-需要 LiteJira 加上「規劃完成日」的後端（LiteJira GH-568 Phase B）。舊伺服器不認得 `planningDoneDate`：建單或修改時帶了它會被 422 拒絕；不帶它的呼叫不受影響。
+需要 LiteJira 加上「規劃完成日」的後端（LiteJira GH-568 Phase B）。舊伺服器不認得 `planningDoneDate`：建單或修改時帶了它會被 422 拒絕，`searchTickets` 用 `sort=planningDoneDate` 也會被拒；不帶它的呼叫不受影響。
 
 > ⚠️ **發版步驟**：LiteJira GH-568 的 Phase B 上 Dev、上正式並抽查通過之後，才合併本版並推 tag 發 npm。
 

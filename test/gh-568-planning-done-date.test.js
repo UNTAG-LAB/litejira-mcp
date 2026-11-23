@@ -50,6 +50,28 @@ test('GH-568：planningDoneDate 是一般欄位、可排序', function () {
   assert.match(batch.inputSchema.properties.value.description, /planningDoneDate 只限 REQ／EPIC，其他類型逐張 422/);
 });
 
+test('GH-568：e4f3d93 的新日期順序在三處說明都守住，且不准改回「≤ 開始日」（審查 M7、M8）', function () {
+  const tools = listTools();
+  const update = tools.find(function (t) { return t.name === 'litejira.updateField'; });
+  const create = tools.find(function (t) { return t.name === 'litejira.createTicket'; });
+  const createParam = create.inputSchema.properties.planningDoneDate.description;
+  assert.match(create.description, /建立日 ≤ planningDoneDate ≤ dueDate \(no order vs startDate\)/);
+  assert.match(createParam, /與開始日先後不限/);
+  // 反向：舊規則「規劃完成日 ≤ 開始日」出現在任何一處都要紅
+  [update.description, create.description, createParam].forEach(function (text) {
+    assert.doesNotMatch(text, /planningDoneDate ≤ startDate|規劃完成日 ≤ 開始日|≤ startDate ≤/);
+  });
+});
+
+test('GH-568：其他說明字面也守住（審查 M10～M12）', function () {
+  const tools = listTools();
+  const update = tools.find(function (t) { return t.name === 'litejira.updateField'; });
+  const create = tools.find(function (t) { return t.name === 'litejira.createTicket'; });
+  assert.match(update.inputSchema.properties.value.description, /planningDoneDate 傳 YYYY-MM-DD（planningDoneDate 只有 REQ／EPIC 可填）/);
+  assert.match(create.description, /The 19 additional fields may be null/);
+  assert.match(update.description, /planningDoneDate is ONLY for REQ and EPIC — other types get 422; null always clears/);
+});
+
 test('GH-568：updateField planningDoneDate 走 PATCH、body 平攤；null 清空', async function () {
   for (const value of ['2026-11-20', null]) {
     const fetchImpl = okFetch({ id: UUID, key: 'REQ-100' });
@@ -85,4 +107,31 @@ test('GH-568：planningDoneDate 的日期形狀在本機先擋（同 startDate�
       return err instanceof LiteJiraTransportError && err.code === 'invalid_argument';
     }, bad);
   });
+});
+
+test('GH-568：updateField／batchSetField 的 planningDoneDate 壞日期在本機就擋，不發請求（審查 M2）', async function () {
+  for (const bad of ['2026/11/20', '2026-02-30', '20261120']) {
+    // batchSetField：buildRequest 就要擋
+    assert.throws(function () {
+      buildRequest({
+        baseUrl: BASE, token: TOKEN, action: 'batchSetField', idempotencyKey: KEY,
+        params: { tickets: ['REQ-100'], field: 'planningDoneDate', value: bad }
+      });
+    }, function (err) {
+      return err instanceof LiteJiraTransportError && err.code === 'invalid_argument';
+    }, 'batchSetField ' + bad);
+    // updateField：走 callTool，要回錯而且一次都沒有打出去
+    const fetchImpl = okFetch({ id: UUID, key: 'REQ-100' });
+    let failed = false;
+    try {
+      const out = await callTool('litejira.updateField', {
+        ticketId: 'REQ-100', field: 'planningDoneDate', value: bad, idempotencyKey: KEY
+      }, cfg(), fetchImpl);
+      failed = Boolean(out && out.isError);
+    } catch (err) {
+      failed = true;
+    }
+    assert.ok(failed, 'updateField ' + bad + ' 必須被擋');
+    assert.strictEqual(fetchImpl.calls.length, 0, 'updateField ' + bad + ' 不得發出請求');
+  }
 });

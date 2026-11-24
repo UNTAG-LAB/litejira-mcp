@@ -38,10 +38,11 @@ const PACK4_TOOLS = [
   ['litejira.batchSetField', { tickets: ['BUG-481'], field: 'priority', value: 'P1-高' }]
 ];
 
-// ── tools/list：23 個工具全部公告，沒有任何 pending ──
-// （GH-317 起多了 getAttachments / uploadAttachment 兩支附件工具。）
+// ── tools/list：24 個工具全部公告，沒有任何 pending ──
+// （GH-317 起多了 getAttachments / uploadAttachment 兩支附件工具，
+//   GH-339 再多一支唯讀的 readAttachmentText。）
 
-test('tools/list 回全部 23 個工具，第四包的 5 個都在', async function () {
+test('tools/list 回全部 24 個工具，第四包的 5 個都在', async function () {
   const names = listTools().map(function (t) { return t.name; }).sort();
   assert.deepStrictEqual(names, [
     'litejira.addComment',
@@ -58,6 +59,7 @@ test('tools/list 回全部 23 個工具，第四包的 5 個都在', async funct
     'litejira.linkTickets',
     'litejira.listComments',
     'litejira.listTicketLinks',
+    'litejira.readAttachmentText',
     'litejira.reassignTicket',
     'litejira.removeAttachment',
     'litejira.removeTicketLink',
@@ -68,7 +70,7 @@ test('tools/list 回全部 23 個工具，第四包的 5 個都在', async funct
     'litejira.updateField',
     'litejira.uploadAttachment'
   ]);
-  assert.strictEqual(names.length, 23);
+  assert.strictEqual(names.length, 24);
 });
 
 test('第四包的 5 個工具都要求 idempotencyKey，且不再宣稱未接線', async function () {

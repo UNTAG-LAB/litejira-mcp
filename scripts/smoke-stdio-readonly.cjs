@@ -133,11 +133,11 @@ async function main() {
     });
 
     let toolCount = 0;
-    await step('tools/list = 23', async function () {
+    await step('tools/list = 24', async function () {
       const tools = resultOf(await client.call('tools/list'), 'tools/list').tools;
       toolCount = tools.length;
-      if (tools.length !== 23) throw new Error('預期 23，實得 ' + tools.length);
-      return '23 個工具';
+      if (tools.length !== 24) throw new Error('預期 24，實得 ' + tools.length);
+      return '24 個工具';
     });
     await step('resources/list + templates = 7', async function () {
       const fixed = resultOf(await client.call('resources/list'), 'resources/list').resources;

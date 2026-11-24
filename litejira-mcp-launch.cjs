@@ -76,7 +76,9 @@ const credFile = resolveCredFile();
 if (credFile) {
   const text = fs.readFileSync(credFile, 'utf8');
   for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^(LTJ_API_URL|LTJ_API_TOKEN|LTJ_API_PAT|LTJ_MCP_ENABLE_WRITES)=(.+)$/);
+    // GH-339：LTJ_V1_API_URL 是 LiteJira v1 REST API 的基底（讀文字附件那一支要用），
+    // 與 Apps Script 的 LTJ_API_URL 是兩個不同的主機；沒設只影響那一支工具
+    const m = line.match(/^(LTJ_API_URL|LTJ_V1_API_URL|LTJ_API_TOKEN|LTJ_API_PAT|LTJ_MCP_ENABLE_WRITES)=(.+)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
   }
 }

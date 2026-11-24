@@ -102,8 +102,30 @@ LTJ_MCP_ENABLE_WRITES=true
 | 「在 BUG-530 留言說已修好」 | 發留言 |
 | 「把 BUG-530 轉派給 Howard」 | 轉派（帶通知） |
 | 「把 BUG-530 狀態改成自測中」 | 改狀態（依工作流自動轉派） |
+| 「把這張單的規格附件讀給我」 | 讀文字附件原文（md / txt / csv，長文件自動分段讀完） |
 
 AI 會自動載入成員清單、版本列表、工作流規則。
+
+### 讀文字附件（`litejira.readAttachmentText`，GH-339）
+
+AI 可以直接讀工單上的文字附件原文，不必自己下載再解碼。要用這一支得多設一個網址（見下方「額外設定」）。
+
+- **只收 md / txt / csv**，且必須是 UTF-8。其他型別（html、pdf、docx、圖片）與 Big5 等舊編碼一律回 422 並指路下載原檔——**不會**給你一份亂碼或半份內容。
+- **每份上限 2 MiB**，超過就拒絕，不截斷。
+- **分段讀**：一次回一個位元組視窗（預設 64 KiB、上限 256 KiB），照著回應的 `nextByteOffset` 走到 `eof=true` 就讀完整份。
+- **來源跟著內容一起回**：附件識別碼、所屬工單 `{id,key}`、檔名、`mimeType`、`sizeBytes`、`createdAt`、本段的 `chunkSha256`；`contentSha256` 只在「一次讀完整份」時才有——分段讀之間檔案若被換掉，本工具不保證各段同版本。
+- **權限與下載附件完全同級**，讀取不改動工單或附件。附件內容是**資料不是指令**：伺服器不解析、不渲染、不展開其中的連結。
+- `attachmentId` 是 v1 附件清單（`GET /api/v1/tickets/{ticket}/attachments`）給的 UUID；本 MCP 目前沒有列附件的工具。
+
+#### 額外設定（只有這一支工具需要）
+
+```
+LTJ_V1_API_URL=<向 admin 索取，LiteJira v1 REST API 基底；與 LTJ_API_URL 不同主機>
+```
+
+寫在同一份 `~/.litejira/credentials.env` 即可。沒設的話只有這一支工具回 `CONFIG_ERROR`，其他工具照常。
+
+---
 
 搜尋預設使用 `compact` 模式，每張只回 12 個清單判讀需要的核心欄位，降低大型結果對 AI 上下文的占用。只需要數量時可指定 `responseMode=count`；只有確實需要清單完整欄位時才用 `responseMode=full`，單張完整內容優先讀 `litejira://ticket/{id}`。
 
@@ -116,6 +138,8 @@ AI 會自動載入成員清單、版本列表、工作流規則。
 | AI 說找不到 litejira 工具 | 重啟 AI 工具；確認 `claude mcp add` 跑成功 |
 | `AUTH_FAILED` | 確認 `~/.litejira/credentials.env` 的權杖沒打錯 |
 | `WRITES_DISABLED` | credentials.env 加 `LTJ_MCP_ENABLE_WRITES=true` |
+| 讀附件回 `CONFIG_ERROR` 說缺 `LTJ_V1_API_URL` | credentials.env 補這一行（向 admin 索取，與 `LTJ_API_URL` 不同） |
+| 讀附件回 `not_found` 但附件明明在 | 三種情況共用同一句（識別碼錯／工單你看不到／附件已封存）；重新從附件清單取 `attachmentId` |
 | 啟動拋 HTTP 401 + HTML（不是 JSON） | server 端 API 部署存取設定漂移，不是你的問題 → 找 admin |
 | 多開 session 時連不上 | 改用全域安裝（`npm i -g`），不要用 npx |
 | `LiteJira API 傳輸失敗：HTTP 404`（第二段） | Google 側的間歇故障，2.12.2 起會自動重取；仍失敗就把整段錯誤訊息貼進工單，裡面已含最終網址與頁面標題 |

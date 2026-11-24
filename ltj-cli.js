@@ -504,6 +504,130 @@ async function postLiteJiraApi(fetchFn, url, token, action, params, options) {
   throw transportError_(stashed.failure, requestId, ctx.attempts, isWrite);
 }
 
+// ── GH-339：LiteJira v1 REST API（/api/v1）的唯讀 GET ──
+//
+// 為什麼不走上面那條：`postLiteJiraApi` 打的是 Apps Script 的 `/exec`
+//（單一網址 + `{token, action, params}` 內文 + 兩段式導向）。讀文字附件的端點
+// 是另一套伺服器的 REST 路徑（`GET /api/v1/attachments/{id}/text`，Bearer 權杖、
+// `{data:…}` 或 `{error:{code,message,details}}` 信封），兩者連主機都不同 ——
+// 硬塞進 action 轉送會變成一條假的抽象。故各自一條，共用脫敏與診斷那幾個私有函數。
+//
+// 🔴 **`redirect: 'error'`**：這條請求帶 `Authorization`，跟著導向跳走等於把權杖
+// 送去對方指定的主機。寧可當成一次失敗，也不自動續跳（同 GH-303 對 307/308 的收斂，
+// 只是這裡更嚴：唯讀 GET 沒有「必須續跳才拿得到結果」的情境）。
+const V1_RETRY_DELAYS_MS = [400, 1200];
+const V1_DEFAULT_BUDGET_MS = 20000;
+const V1_TIMEOUT_MS = 10000;
+
+// 使用者設定的可能是主機根、也可能已經含 /api/v1，兩種都收斂成同一個基底。
+// 尾斜線一律去掉，避免拼出 `//attachments`。
+function v1ApiBase_(url) {
+  const trimmed = String(url || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  return /\/api\/v1$/.test(trimmed) ? trimmed : trimmed + '/api/v1';
+}
+
+// 路徑段一律編碼：attachmentId 雖已由 schema 擋成 UUID 形狀，
+// 但這個函數不該依賴呼叫端的驗證（多一道不花錢）
+function buildV1Url_(baseUrl, segments, query) {
+  const base = v1ApiBase_(baseUrl);
+  if (!base) return null;
+  const path = (segments || []).map(function (s) { return encodeURIComponent(String(s)); }).join('/');
+  let target;
+  try {
+    target = new URL(base + '/' + path);
+  } catch (err) {
+    return null;
+  }
+  Object.keys(query || {}).forEach(function (key) {
+    const value = query[key];
+    if (value === undefined || value === null || value === '') return;
+    target.searchParams.set(key, String(value));
+  });
+  return target.toString();
+}
+
+// 傳輸層失敗（非 JSON、連不上、被導向）。診斷欄位與 GH-303 那條同一組，
+// 網址一律是遮蔽版 —— 這個錯誤會被上層寫進紀錄
+function v1TransportError_(failure, requestId, attempts) {
+  const info = failure || { leg: 'v1', status: 0, contentType: '', finalUrl: '', body: '' };
+  const error = new Error(
+    'LiteJira v1 API 讀取失敗：HTTP ' + info.status + '（共嘗試 ' + attempts + ' 次）' +
+    '\n  requestId: ' + requestId +
+    '\n  最終網址: ' + info.finalUrl +
+    '\n  content-type: ' + (info.contentType || '(無)') +
+    '\n  回應內容: ' + (info.body || '(空)')
+  );
+  error.litejiraTransport = info;
+  return error;
+}
+
+/**
+ * 打一條 v1 REST 的唯讀 GET，回 `{ok:true,data}` 或 `{ok:false,status,error}`。
+ *
+ * 業務錯誤（4xx + `{error:{code,…}}`）**不丟例外**：呼叫端要以 `code` 分支成 isError
+ * ＋ hint（同 `postLiteJiraApi` 的信封慣例）。只有「根本沒拿到我方信封」才丟。
+ * 唯讀且無副作用，故暫時性失敗可安全重試（與第一段寫入不重發的理由正相反）。
+ */
+async function getLiteJiraApiV1(fetchFn, baseUrl, token, segments, query, options) {
+  const opts = options || {};
+  const requestId = opts.requestId || ('ltj-' + Date.now());
+  const url = buildV1Url_(baseUrl, segments, query);
+  if (!url) {
+    throw v1TransportError_(
+      { leg: 'v1', status: 0, contentType: '', finalUrl: '(未取得)', body: 'v1 API 網址無法解析為合法網址' },
+      requestId, 0);
+  }
+  const deadline = Date.now() + (opts.budgetMs === undefined ? V1_DEFAULT_BUDGET_MS : opts.budgetMs);
+  const timeoutMs = opts.timeoutMs === undefined ? V1_TIMEOUT_MS : opts.timeoutMs;
+  const sleep = opts.sleep || function (ms) { return new Promise(function (done) { setTimeout(done, ms); }); };
+
+  let attempts = 0;
+  let failure = null;
+  for (let attempt = 0; attempt <= V1_RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      if (Date.now() > deadline) break;
+      await sleep(V1_RETRY_DELAYS_MS[attempt - 1]);
+    }
+    attempts++;
+    let response;
+    let text;
+    try {
+      response = await fetchFn(url, {
+        method: 'GET',
+        redirect: 'error',
+        headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
+        signal: timeoutSignal_(timeoutMs)
+      });
+      // text() 與 fetch 包在同一個 try：逾時可能落在「標頭已到、內容沒讀完」
+      text = await response.text();
+    } catch (err) {
+      failure = describeThrown_(err, 'v1', url);
+      continue;
+    }
+    const payload = parseJson_(text);
+    if (payload !== null) {
+      if (response.status >= 200 && response.status < 300) {
+        return { ok: true, status: response.status, data: payload.data === undefined ? payload : payload.data };
+      }
+      const apiError = payload.error || {};
+      return {
+        ok: false,
+        status: response.status,
+        error: {
+          code: apiError.code || 'API_ERROR',
+          message: apiError.message || 'LiteJira API error',
+          details: apiError.details
+        }
+      };
+    }
+    // 不是 JSON ⇒ 拿到的不是我方回應（存取閘門的 HTML、代理錯誤頁…）
+    failure = describeFailure_(response, text, 'v1', url);
+    if (!isTransient_(failure.status)) break;
+  }
+  throw v1TransportError_(failure, requestId, attempts);
+}
+
 function parseOptions_(args) {
   const positionals = [];
   const values = {};
@@ -595,7 +719,8 @@ function printUsage_(writeLine) {
 module.exports = {
   parseCommand,
   runCli,
-  postLiteJiraApi
+  postLiteJiraApi,
+  getLiteJiraApiV1
 };
 
 if (require.main === module) {
